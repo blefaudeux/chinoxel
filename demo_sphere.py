@@ -31,7 +31,7 @@ def demo_sphere(n_views: int = 10):
 
     # Generate the synthetic views
     views = []
-    for i in range(n_views):
+    for _ in range(n_views):
         view = ti.field(dtype=ti.f32, shape=resolution)
         write_circle(view, 100.0)
         views.append(view)
@@ -41,12 +41,7 @@ def demo_sphere(n_views: int = 10):
     for _ in range(n_views):
         # TODO: generate the virtual views,
         # turning around the sphere while looking at it
-        pose = ti.Matrix(
-            [1.0, 0.0, 0.0, 0.0],
-            [0.0, 1.0, 0.0, 0.0],
-            [0.0, 0.0, 1.0, 0.0],
-            [0.0, 0.0, 0.0, 0.0],
-        )
+        pose = ti.Matrix.field(4, 4, dtype=ti.f32, shape=(1, 1))
         poses.append(pose)
 
     # Optimize the scene on the {pose, views} set
