@@ -2,7 +2,7 @@ from numpy import diff
 import taichi as ti
 from typing import Tuple, List
 
-ti.init(arch=ti.gpu)
+ti.init(arch=ti.cpu)
 
 EPS = 1e-4
 INF = 1e10
@@ -162,7 +162,7 @@ class Scene:
         """
         Given a reference view, create a loss by comparing it to the current view_buffer
 
-        .. note: this is most probably not optimal in terms of speed, this could be 
+        .. note: this is most probably not optimal in terms of speed, this could be
             rewritten as a matmultiplications
         """
         for u, v in self.view_buffer:
@@ -176,33 +176,43 @@ class Scene:
         for x, y, z in self.grid:
             self.grid[x, y, z] = ti.random(ti.float32)
 
-    def optimize(self, poses: List[ti.Matrix], views: List[ti.Vector]):
+    def optimize(self, poses: List[ti.Matrix], views: List[ti.Vector], use_gui: False):
         """
         Given a set of views and corresponding poses, optimize the underlying scene
         """
 
         assert len(poses) == len(views), "You must provide one camera pose per view"
 
+        if use_gui:
+            gui = ti.GUI("Chinoxel", self.res, fast_gui=False)
+            gui.fps_limit = 60
+        else:
+            gui = None
+
         # Initialize the grid with random data, the dummy way
         self.random_grid()
 
-        for pose, view in zip(poses, views):
-            # project the grid on this viewpoint
-            self.view_buffer.fill(0.0)
-            self.camera_pose[0, 0] = pose[0, 0]
-            self.render()
+        while not gui or gui.running:
+            for pose, view in zip(poses, views):
+                # project the grid on this viewpoint
+                self.view_buffer.fill(0.0)
+                self.camera_pose[0, 0] = pose[0, 0]
+                self.render()
 
-            # loss is this vs. the reference at that point
-            self.loss[None] = 0
-            with ti.Tape(loss=self.loss):
-                self.reference_buffer = view
-                self.compute_loss()
+                # loss is this vs. the reference at that point
+                self.loss[None] = 0
+                with ti.Tape(loss=self.loss):
+                    self.reference_buffer = view
+                    self.compute_loss()
 
-            # update the field
-            self.gradient_descent()
+                # update the field
+                self.gradient_descent()
 
-            # dummy, show the current grid
-            print(self.grid)
+                # dummy, show the current grid
+                if use_gui:
+                    gui.set_image(self.view_buffer)
+                    gui.show()
 
-            # TODO: sparsify ?
-            # TODO: Adjust LR ?
+                print("Frame processed")
+                # TODO: sparsify ?
+                # TODO: Adjust LR ?
