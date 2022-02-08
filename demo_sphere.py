@@ -66,8 +66,9 @@ def demo_sphere_render():
     gui = ti.GUI("Chinoxel", resolution[0], fast_gui=False)
     gui.fps_limit = 60
 
-    while True:
+    while gui.running:
         scene.render()
+        scene.tonemap()
         gui.set_image(scene.view_buffer)
         gui.show()
 

@@ -11,3 +11,7 @@ TODOs:
 - [x] Color buffers
 - [ ] General speedup
 - [x] Propagate rays over depth
+
+<p align="center">
+  <img src="chinoxel.png" width=600>
+</p>

@@ -35,6 +35,7 @@ class Scene:
         # Render view
         self.camera_pose = ti.Matrix.field(4, 4, dtype=ti.f32, shape=(1, 1))
         self.view_buffer = ti.Vector.field(n=3, dtype=ti.f32, shape=resolution)
+
         self.reference_buffer = None
 
         self.max_depth_ray = max_depth_ray
@@ -116,23 +117,28 @@ class Scene:
 
         # - Batch compute all the directions to the nodes
         X, Y, Z = self.grid_node_pos.shape
-        diff = ti.Vector([0.0, 0.0, 0.0])
+        diff_min = ti.Vector([0.0, 0.0, 0.0])
 
         for x in range(X):
             for y in range(Y):
                 for z in range(Z):
+
                     # Compute the direct line of sight, then offset
                     los = self.grid_node_pos[x, y, z] - pose
                     proj = los.dot(ray)
-                    diff = los - proj * ray
-                    diff_norm = diff.norm()
 
-                    # Now keep track of the node which is the closest
-                    if diff_norm < min_dist and proj > 0.0:
-                        min_dist = diff_norm
-                        x_min, y_min, z_min = x, y, z
+                    # Check that this point is not backwards
+                    if proj > 0.0:
+                        diff = proj * ray - los
+                        diff_norm = diff.norm()
 
-        return min_dist < INF, x_min, y_min, z_min, diff
+                        # Now keep track of the node which is the closest
+                        if diff_norm < min_dist:
+                            min_dist = diff_norm
+                            diff_min = diff
+                            x_min, y_min, z_min = x, y, z
+
+        return min_dist < INF, x_min, y_min, z_min, diff_min
 
     @ti.func
     def interpolate(self, x, y, z, diff):
@@ -162,6 +168,15 @@ class Scene:
         return acc
 
     @ti.kernel
+    def tonemap(self):
+        """
+        For now, just normalized the rendered view.
+        Could be worth it applying a gamma curve for instance
+        """
+        for i, j in self.view_buffer:
+            self.view_buffer[i, j] = self.view_buffer[i, j] / self.max_depth_ray
+
+    @ti.kernel
     def render(self):
         """
         Given a camera pose, generate the corresponding view
@@ -179,14 +194,11 @@ class Scene:
             d = self.get_ray(u, v)
 
             # Ray marching variables
-            hit = True
-            steps = 0
+            hit, steps = True, 0
             colour_acc = ti.Vector([0.0, 0.0, 0.0,])
 
             while hit and steps < self.max_depth_ray:
-                # Raymarch
-                # while depth < self.max_depth_ray:
-                # Find the next "hit"
+                # Raymarch, find the next "hit"
                 hit, x, y, z, diff = self.closest_node(pos, d)
 
                 if hit:
