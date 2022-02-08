@@ -75,7 +75,6 @@ class Scene:
             ]
         )
 
-
     @ti.func
     def get_ray(self, u, v):
         """
@@ -117,20 +116,50 @@ class Scene:
 
         # - Batch compute all the directions to the nodes
         X, Y, Z = self.grid_node_pos.shape
+        diff = ti.Vector([0.0, 0.0, 0.0])
 
         for x in range(X):
             for y in range(Y):
                 for z in range(Z):
+                    # Compute the direct line of sight, then offset
                     los = self.grid_node_pos[x, y, z] - pose
                     proj = los.dot(ray)
-                    diff = (los - proj * ray).norm()
+                    diff = los - proj * ray
+                    diff_norm = diff.norm()
 
                     # Now keep track of the node which is the closest
-                    if diff < min_dist and proj > 0.0:
-                        min_dist = diff
+                    if diff_norm < min_dist and proj > 0.0:
+                        min_dist = diff_norm
                         x_min, y_min, z_min = x, y, z
 
-        return x_min, y_min, z_min, min_dist
+        return min_dist < INF, x_min, y_min, z_min, diff
+
+    @ti.func
+    def interpolate(self, x, y, z, diff):
+        # Very basic, average the contributions from the 8 closest nodes
+        dx = (
+            1 if diff[0] > 0 else -1
+        )  # TODO: rewrite as .normalize().round() or something
+        dy = 1 if diff[1] > 0 else -1
+        dz = 1 if diff[2] > 0 else -1
+
+        acc = ti.Vector([0.0, 0.0, 0.0,])
+
+        # TODO: Rewrite, this is horrible
+        x_, y_, z_ = x, y, z
+        acc += 0.125 * self.grid[x_, y_, z_]
+        x_ = min(max(x + dx, 0), self.grid.shape[0])
+        acc += 0.125 * self.grid[x_, y_, z_]
+        y_ = min(max(y + dy, 0), self.grid.shape[1])
+        acc += 0.125 * self.grid[x_, y_, z_]
+        z_ = min(max(z + dz, 0), self.grid.shape[2])
+        acc += 0.125 * self.grid[x_, y_, z_]
+        x_ = min(max(x - dx, 0), self.grid.shape[0])
+        acc += 0.125 * self.grid[x_, y_, z_]
+        y_ = min(max(y - dy, 0), self.grid.shape[1])
+        acc += 0.125 * self.grid[x_, y_, z_]
+        
+        return acc
 
     @ti.kernel
     def render(self):
@@ -155,16 +184,15 @@ class Scene:
             # Raymarch
             # while depth < self.max_depth_ray:
             # Find the next "hit"
-            x, y, z, dist = self.closest_node(pos, d)
+            hit, x, y, z, diff = self.closest_node(pos, d)
 
-            if dist < INF:
-                # Simple accumulation over the scalar for now
-                colour_acc += self.grid[x, y, z]  # FIXME
+            if hit:
+                colour_acc += self.interpolate(x, y, z, diff)
 
                 # Update the position and keep going
                 # FIXME: This is not quite correct,
                 # the ray may go close but not to the node really
-                pos += dist * d  # self.grid_node_pos[x, y, z]
+                pos += diff.norm() * d  # self.grid_node_pos[x, y, z]
 
             self.view_buffer[u, v] = colour_acc
 
