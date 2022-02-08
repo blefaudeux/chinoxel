@@ -36,15 +36,15 @@ def write_sphere(grid: ti.template(), grid_size: int):  # type: ignore
     for x, y, z in grid:
         dist = ti.Vector([x, y, z]) - span
         if dist.norm_sqr() < sq_radius:
-            grid[x, y, z] = ti.Vector([1.0, 0.0, 0.0])
+            grid[x, y, z] = ti.Vector([ti.random(), ti.random(), ti.random()])
 
 
 def get_scene():
     # Build the Chinoxel scene
     # Settings here are completely arbitrary
     n_nodes = 20
-    resolution = (320, 320)
-    focal = 1 / 320.0
+    resolution = (800, 800)
+    focal = 1 / resolution[0]
     scene = Scene(
         grid_size=(n_nodes, n_nodes, n_nodes),
         resolution=resolution,
