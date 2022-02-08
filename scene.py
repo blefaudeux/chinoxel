@@ -158,7 +158,7 @@ class Scene:
         acc += 0.125 * self.grid[x_, y_, z_]
         y_ = min(max(y - dy, 0), self.grid.shape[1])
         acc += 0.125 * self.grid[x_, y_, z_]
-        
+
         return acc
 
     @ti.kernel
@@ -168,7 +168,7 @@ class Scene:
         """
 
         for u, v in self.view_buffer:
-            # Compute the ray direction
+            # Compute the initial ray direction
             pos = ti.Vector(
                 [
                     self.camera_pose[0, 0][0, 3],
@@ -178,21 +178,24 @@ class Scene:
             )
             d = self.get_ray(u, v)
 
-            #
+            # Ray marching variables
+            hit = True
+            steps = 0
             colour_acc = ti.Vector([0.0, 0.0, 0.0,])
 
-            # Raymarch
-            # while depth < self.max_depth_ray:
-            # Find the next "hit"
-            hit, x, y, z, diff = self.closest_node(pos, d)
+            while hit and steps < self.max_depth_ray:
+                # Raymarch
+                # while depth < self.max_depth_ray:
+                # Find the next "hit"
+                hit, x, y, z, diff = self.closest_node(pos, d)
 
-            if hit:
-                colour_acc += self.interpolate(x, y, z, diff)
+                if hit:
+                    colour_acc += self.interpolate(x, y, z, diff)
 
-                # Update the position and keep going
-                # FIXME: This is not quite correct,
-                # the ray may go close but not to the node really
-                pos += diff.norm() * d  # self.grid_node_pos[x, y, z]
+                    # Update the position and keep going
+                    pos = self.grid_node_pos[x, y, z] + diff
+
+                steps += 1
 
             self.view_buffer[u, v] = colour_acc
 

@@ -49,7 +49,7 @@ def get_scene():
         grid_size=(n_nodes, n_nodes, n_nodes),
         resolution=resolution,
         focal=focal,
-        max_depth_ray=1,
+        max_depth_ray=5,
         LR=0.1,
     )
 
