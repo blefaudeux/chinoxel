@@ -1,7 +1,6 @@
 import taichi as ti
 from typing import Tuple, List
 
-ti.init(arch=ti.cpu)
 
 EPS = 1e-4
 INF = 1e10
@@ -29,6 +28,7 @@ class Scene:
         self.grid_node_pos = ti.Vector.field(
             n=3, dtype=ti.f32, shape=grid_size, needs_grad=False
         )
+        self.grid_size = grid_size
         self.diff_field = ti.field(
             dtype=ti.f32, shape=self.grid_node_pos.shape, needs_grad=False
         )
@@ -94,13 +94,7 @@ class Scene:
         u_ = u - ti.static(self.res[0] / 2)
         v_ = v - ti.static(self.res[1] / 2)
 
-        d = ti.Matrix(
-            [
-                -self.focal * u_,
-                -self.focal * v_,
-                -1.0,
-            ]
-        )
+        d = ti.Matrix([-self.focal * u_, -self.focal * v_, -1.0,])
         d = d.normalized()
 
         # Matmul with the camera pose to move to the reference coordinate

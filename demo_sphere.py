@@ -1,6 +1,5 @@
 from scene import Scene
 import taichi as ti
-from typing import Tuple
 
 
 @ti.kernel
@@ -42,8 +41,9 @@ def write_sphere(grid: ti.template(), grid_size: int):  # type: ignore
             grid[x, y, z] = 1.0
 
 
-def demo_sphere_render(n_views: int = 10):
+def get_scene():
     # Build the Chinoxel scene
+    # Settings here are completely arbitrary
     n_nodes = 20
     resolution = (320, 320)
     focal = 1 / 320.0
@@ -55,8 +55,14 @@ def demo_sphere_render(n_views: int = 10):
         LR=0.1,
     )
 
+    return scene, resolution
+
+
+def demo_sphere_render():
+    scene, resolution = get_scene()
+
     # Write a sphere in the scene, and check the rendering phase
-    write_sphere(scene.grid, n_nodes)
+    write_sphere(scene.grid, scene.grid_size[0])
 
     # Check the rendering
     gui = ti.GUI("Chinoxel", resolution[0], fast_gui=False)
@@ -69,17 +75,7 @@ def demo_sphere_render(n_views: int = 10):
 
 
 def demo_sphere_optimize(n_views: int = 10):
-    # Build the Chinoxel scene
-    n_nodes = 20
-    resolution = (320, 320)
-    focal = 1 / 320.0
-    scene = Scene(
-        grid_size=(n_nodes, n_nodes, n_nodes),
-        resolution=resolution,
-        focal=focal,
-        max_depth_ray=1,
-        LR=0.1,
-    )
+    scene, resolution = get_scene()
 
     # Generate the synthetic views
     views = []
@@ -102,4 +98,6 @@ def demo_sphere_optimize(n_views: int = 10):
 
 
 if __name__ == "__main__":
+    ti.init(arch=ti.gpu)
+
     demo_sphere_render()
