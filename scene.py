@@ -24,18 +24,17 @@ class Scene:
 
         # For now just store a scalar value in the grid, as a follow up
         # we should store spherical harmonics
-        self.grid = ti.field(dtype=ti.f32, shape=grid_size, needs_grad=True)
+        self.grid = ti.Vector.field(n=3, dtype=ti.f32, shape=grid_size, needs_grad=True)
+        self.grid.fill(0.0)
+
         self.grid_node_pos = ti.Vector.field(
             n=3, dtype=ti.f32, shape=grid_size, needs_grad=False
         )
         self.grid_size = grid_size
-        self.diff_field = ti.field(
-            dtype=ti.f32, shape=self.grid_node_pos.shape, needs_grad=False
-        )
 
         # Render view
         self.camera_pose = ti.Matrix.field(4, 4, dtype=ti.f32, shape=(1, 1))
-        self.view_buffer = ti.field(dtype=ti.f32, shape=resolution)
+        self.view_buffer = ti.Vector.field(n=3, dtype=ti.f32, shape=resolution)
         self.reference_buffer = None
 
         self.max_depth_ray = max_depth_ray
@@ -75,6 +74,7 @@ class Scene:
                 [0.0, 0.0, 0.0, 0.0],
             ]
         )
+
 
     @ti.func
     def get_ray(self, u, v):
@@ -150,7 +150,7 @@ class Scene:
             d = self.get_ray(u, v)
 
             #
-            colour_acc = 0.0
+            colour_acc = ti.Vector([0.0, 0.0, 0.0,])
 
             # Raymarch
             # while depth < self.max_depth_ray:

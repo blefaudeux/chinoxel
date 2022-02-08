@@ -35,10 +35,8 @@ def write_sphere(grid: ti.template(), grid_size: int):  # type: ignore
 
     for x, y, z in grid:
         dist = ti.Vector([x, y, z]) - span
-        if dist.norm_sqr() > sq_radius:
-            grid[x, y, z] = 0.0
-        else:
-            grid[x, y, z] = 1.0
+        if dist.norm_sqr() < sq_radius:
+            grid[x, y, z] = ti.Vector([1.0, 0.0, 0.0])
 
 
 def get_scene():
