@@ -22,10 +22,18 @@ class Scene:
         LR: float = 0.1,
     ):
 
-        # For now just store a scalar value in the grid, as a follow up
-        # we should store spherical harmonics
-        self.grid = ti.Vector.field(n=3, dtype=ti.f32, shape=grid_size, needs_grad=True)
-        self.grid.fill(0.0)
+        # For now just store [RGBA] in the grid
+        # TODO: follow up we should store spherical harmonics
+
+        self.grid = ti.Struct.field(
+            {
+                "color": ti.types.vector(3, ti.f32),
+                "opacity": ti.f32,
+            },
+            shape=grid_size,
+        )
+        self.grid.color.fill(0.0)  # this is legit in taichi, and pretty wunderbar
+        self.grid.opacity.fill(1.0)
 
         self.grid_node_pos = ti.Vector.field(
             n=3, dtype=ti.f32, shape=grid_size, needs_grad=False
@@ -94,7 +102,13 @@ class Scene:
         u_ = u - ti.static(self.res[0] / 2)
         v_ = v - ti.static(self.res[1] / 2)
 
-        d = ti.Matrix([-self.focal * u_, -self.focal * v_, -1.0,])
+        d = ti.Matrix(
+            [
+                -self.focal * u_,
+                -self.focal * v_,
+                -1.0,
+            ]
+        )
         d = d.normalized()
 
         # Matmul with the camera pose to move to the reference coordinate
@@ -149,21 +163,27 @@ class Scene:
         dy = 1 if diff[1] > 0 else -1
         dz = 1 if diff[2] > 0 else -1
 
-        acc = ti.Vector([0.0, 0.0, 0.0,])
+        acc = ti.Vector(
+            [
+                0.0,
+                0.0,
+                0.0,
+            ]
+        )
 
         # TODO: Rewrite, this is horrible
         x_, y_, z_ = x, y, z
-        acc += 0.125 * self.grid[x_, y_, z_]
+        acc += 0.125 * self.grid[x_, y_, z_].color * self.grid[x_, y_, z_].opacity
         x_ = min(max(x + dx, 0), self.grid.shape[0])
-        acc += 0.125 * self.grid[x_, y_, z_]
+        acc += 0.125 * self.grid[x_, y_, z_].color * self.grid[x_, y_, z_].opacity
         y_ = min(max(y + dy, 0), self.grid.shape[1])
-        acc += 0.125 * self.grid[x_, y_, z_]
+        acc += 0.125 * self.grid[x_, y_, z_].color * self.grid[x_, y_, z_].opacity
         z_ = min(max(z + dz, 0), self.grid.shape[2])
-        acc += 0.125 * self.grid[x_, y_, z_]
+        acc += 0.125 * self.grid[x_, y_, z_].color * self.grid[x_, y_, z_].opacity
         x_ = min(max(x - dx, 0), self.grid.shape[0])
-        acc += 0.125 * self.grid[x_, y_, z_]
+        acc += 0.125 * self.grid[x_, y_, z_].color * self.grid[x_, y_, z_].opacity
         y_ = min(max(y - dy, 0), self.grid.shape[1])
-        acc += 0.125 * self.grid[x_, y_, z_]
+        acc += 0.125 * self.grid[x_, y_, z_].color * self.grid[x_, y_, z_].opacity
 
         return acc
 
@@ -195,7 +215,13 @@ class Scene:
 
             # Ray marching variables
             hit, steps = True, 0
-            colour_acc = ti.Vector([0.0, 0.0, 0.0,])
+            colour_acc = ti.Vector(
+                [
+                    0.0,
+                    0.0,
+                    0.0,
+                ]
+            )
 
             while hit and steps < self.max_depth_ray:
                 # Raymarch, find the next "hit"

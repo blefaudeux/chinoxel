@@ -5,7 +5,7 @@ import taichi as ti
 @ti.kernel
 def write_circle(buffer: ti.template(), circle_radius: float):
     center = ti.Vector([buffer.shape[0] / 2.0, buffer.shape[1] / 2.0])
-    sq_radius = circle_radius ** 2
+    sq_radius = circle_radius**2
 
     for u, v in buffer:
         pos = ti.Vector([u, v], dt=ti.float32) - center
@@ -36,7 +36,11 @@ def write_sphere(grid: ti.template(), grid_size: int):  # type: ignore
     for x, y, z in grid:
         dist = ti.Vector([x, y, z]) - span
         if dist.norm_sqr() < sq_radius:
-            grid[x, y, z] = ti.Vector([ti.random(), ti.random(), ti.random()])
+            grid[x, y, z].color = ti.Vector(
+                [ti.random(), ti.random(), ti.random()]
+            ).normalized()
+
+            grid[x, y, z].opacity = ti.random()
 
 
 def get_scene():
