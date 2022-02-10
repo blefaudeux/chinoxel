@@ -106,8 +106,8 @@ class Scene:
         return d
 
     @ti.func
-    def closest_node(self, pose, ray):
-        """Return the element of the grid which is the next closest to the ray
+    def intersect(self, pose, ray):
+        """Return the element of the grid which is the closest to the ray
 
         ..note: this could be computed in one go with linear algebra,
             probably sub optimal
@@ -142,7 +142,43 @@ class Scene:
                             diff_min = diff
                             x_min, y_min, z_min = x, y, z
 
-        return min_dist < INF, x_min, y_min, z_min, diff_min
+        return min_dist < INF, ti.Vector([x_min, y_min, z_min], ti.i32), diff_min
+
+    @ti.func
+    def closest_node(self, pose, previous_node):
+        """Return the element of the grid which is the next closest to the ray
+
+        ..note: this could be computed in one go with linear algebra,
+            probably sub optimal
+
+        .. note: instead of computing all the distances,
+            probably that some hierarchical partitioning would be faster
+        """
+
+        min_dist = INF
+
+        X, Y, Z = self.grid_size
+
+        x_min = max(previous_node[0] - 1, 0)
+        x_max = min(previous_node[0] + 1, X)
+
+        y_min = max(previous_node[1] - 1, 0)
+        y_max = min(previous_node[1] + 1, Y)
+
+        z_min = max(previous_node[2] - 1, 0)
+        z_max = min(previous_node[2] + 1, Z)
+
+        for x in range(x_min, x_max):
+            for y in range(y_min, y_max):
+                for z in range(z_min, z_max):
+                    dist = (self.grid_node_pos[x, y, z] - pose).norm()
+
+                    # Now keep track of the node which is the closest
+                    if dist < min_dist:
+                        min_dist = dist
+                        x_min, y_min, z_min = x, y, z
+
+        return min_dist < INF, ti.Vector([x_min, y_min, z_min], ti.i32)
 
     @ti.func
     def contrib(self, pos, x, y, z):
@@ -155,12 +191,11 @@ class Scene:
         return ti.exp(-norm) * (1.0 - ti.exp(-c)) * self.grid[x, y, z].color
 
     @ti.func
-    def interpolate(self, x, y, z, pos, acc_norm):
+    def interpolate(self, close, pos, acc_norm):
         # Find the 8 closest nodes
         # we have the indices of the closest node, and the point where the
         # ray is right now
-        ref_node = self.grid_node_pos[x, y, z]
-        diff = pos - ref_node
+        diff = pos - self.grid_node_pos[close[0], close[1], close[2]]
 
         dx = 1 if diff[0] > 0 else -1
         dy = 1 if diff[1] > 0 else -1
@@ -172,7 +207,8 @@ class Scene:
         acc = ti.Vector([0.0, 0.0, 0.0,])
 
         # TODO: Rewrite, this is horrible
-        x_, y_, z_ = x, y, z
+        x_, y_, z_ = close[0], close[1], close[2]
+
         c = self.contrib(pos, x_, y_, z_)
         acc_norm += c
         acc += self.w_contrib(acc_norm, c, x_, y_, z_)
@@ -230,6 +266,7 @@ class Scene:
         Given a camera pose, generate the corresponding view
         """
 
+        # NOTE: assuming an isotropic grid
         cell_size = self.grid_node_pos[1, 0, 0] - self.grid_node_pos[1, 0, 0]
 
         for u, v in self.view_buffer:
@@ -242,26 +279,31 @@ class Scene:
                 ]
             )
             ray = self.get_ray(u, v)
+            ray_abs_max = ti.max(ray.max(), -ray.min())
+            ray_step = ray / ray_abs_max * cell_size  # unitary on one direction
 
             # Ray marching variables
-            hit, steps = True, 0
+            steps = 0
             colour_acc = ti.Vector([0.0, 0.0, 0.0,])
             norm_acc = 0.0
 
+            # First, intersection
+            hit, close, diff = self.intersect(pos, ray)
+
+            pos = self.grid_node_pos[close[0], close[1], close[2]] + diff
+
+            # After that, marching cubes
             while hit and steps < self.max_depth_ray:
-                # Raymarch, find the next "hit"
-                hit, x, y, z, diff = self.closest_node(pos, ray)
+                # Fetch the colour in between the 8 closest nodes
+                contrib, norm_acc = self.interpolate(close, pos, norm_acc)
+                colour_acc += contrib
 
-                if hit:
-                    # Update the position
-                    pos = self.grid_node_pos[x, y, z] + diff
+                # Move to the next cell
+                pos = pos + ray_step  # Update the reference position
 
-                    # Interpolate the colour around this newfound position
-                    contrib, norm_acc = self.interpolate(x, y, z, pos, norm_acc)
-                    colour_acc += contrib
-
-                    # Move to the next cell
-                    pos += cell_size * ray
+                # Update the closest point
+                pos += cell_size * ray
+                hit, close = self.closest_node(pos, close)
 
                 steps += 1
 
