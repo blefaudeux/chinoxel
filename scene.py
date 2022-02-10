@@ -26,14 +26,16 @@ class Scene:
         # TODO: follow up we should store spherical harmonics
 
         self.grid = ti.Struct.field(
-            {"color": ti.types.vector(3, ti.f32), "opacity": ti.f32,}, shape=grid_size,
+            {
+                "color": ti.types.vector(3, ti.f32),
+                "opacity": ti.f32,
+                "pose": ti.types.vector(3, ti.f32),
+            },
+            shape=grid_size,
         )
         self.grid.color.fill(0.0)  # this is legit in taichi, and pretty wunderbar
         self.grid.opacity.fill(1.0)
 
-        self.grid_node_pos = ti.Vector.field(
-            n=3, dtype=ti.f32, shape=grid_size, needs_grad=False
-        )
         self.grid_size = grid_size
 
         # Render view
@@ -59,13 +61,13 @@ class Scene:
 
         We arbitrarily constraint the grid to be smaller than [-1, 1]
         """
-        center = ti.Vector(self.grid_node_pos.shape, ti.float32) / 2.0
+        center = ti.Vector(self.grid_size, ti.float32) / 2.0
         scale = (
-            self.grid_node_pos.shape[0] / 2.0
+            self.grid_size[0] / 2.0
         )  # FIXME: the grid could have different sizes over different dimensions
 
-        for x, y, z in self.grid_node_pos:
-            self.grid_node_pos[x, y, z] = (
+        for x, y, z in self.grid:
+            self.grid[x, y, z].pose = (
                 ti.Vector([x, y, z], dt=ti.float32) - center
             ) / scale
 
@@ -120,20 +122,19 @@ class Scene:
         x_min, y_min, z_min = -1, -1, -1
 
         # - Batch compute all the directions to the nodes
-        X, Y, Z = self.grid_node_pos.shape
         diff_min = ti.Vector([0.0, 0.0, 0.0])
 
-        for x in range(X):
-            for y in range(Y):
-                for z in range(Z):
+        for x in range(self.grid_size[0]):
+            for y in range(self.grid_size[1]):
+                for z in range(self.grid_size[2]):
 
                     # Compute the direct line of sight, then offset
-                    los = self.grid_node_pos[x, y, z] - pose
-                    proj = los.dot(ray)
+                    line_of_sight = self.grid[x, y, z].pose - pose
+                    proj = line_of_sight.dot(ray)
 
                     # Check that this point is not backwards
                     if proj > 0.0:
-                        diff = proj * ray - los
+                        diff = proj * ray - line_of_sight
                         diff_norm = diff.norm()
 
                         # Now keep track of the node which is the closest
@@ -142,7 +143,7 @@ class Scene:
                             diff_min = diff
                             x_min, y_min, z_min = x, y, z
 
-        return min_dist < INF, ti.Vector([x_min, y_min, z_min], ti.i32), diff_min
+        return ti.Vector([x_min, y_min, z_min]), diff_min
 
     @ti.func
     def closest_node(self, pose, previous_node):
@@ -171,7 +172,7 @@ class Scene:
         for x in range(x_min, x_max):
             for y in range(y_min, y_max):
                 for z in range(z_min, z_max):
-                    dist = (self.grid_node_pos[x, y, z] - pose).norm()
+                    dist = (self.grid[x, y, z].pose - pose).norm()
 
                     # Now keep track of the node which is the closest
                     if dist < min_dist:
@@ -182,7 +183,7 @@ class Scene:
 
     @ti.func
     def contrib(self, pos, x, y, z):
-        dist = (pos - self.grid_node_pos[x, y, z]).norm()
+        dist = (pos - self.grid[x, y, z].pose).norm()
 
         return self.grid[x, y, z].opacity * dist
 
@@ -191,11 +192,11 @@ class Scene:
         return ti.exp(-norm) * (1.0 - ti.exp(-c)) * self.grid[x, y, z].color
 
     @ti.func
-    def interpolate(self, close, pos, acc_norm):
+    def interpolate(self, close, pos, carry):
         # Find the 8 closest nodes
         # we have the indices of the closest node, and the point where the
         # ray is right now
-        diff = pos - self.grid_node_pos[close[0], close[1], close[2]]
+        diff = pos - self.grid[close[0], close[1], close[2]].pose
 
         dx = 1 if diff[0] > 0 else -1
         dy = 1 if diff[1] > 0 else -1
@@ -210,46 +211,46 @@ class Scene:
         x_, y_, z_ = close[0], close[1], close[2]
 
         c = self.contrib(pos, x_, y_, z_)
-        acc_norm += c
-        acc += self.w_contrib(acc_norm, c, x_, y_, z_)
+        carry += c
+        acc += self.w_contrib(carry, c, x_, y_, z_)
 
         x_ += dx
         c = self.contrib(pos, x_, y_, z_)
-        acc_norm += c
-        acc += self.w_contrib(acc_norm, c, x_, y_, z_)
+        carry += c
+        acc += self.w_contrib(carry, c, x_, y_, z_)
 
         y_ += dy
         c = self.contrib(pos, x_, y_, z_)
-        acc_norm += c
-        acc += self.w_contrib(acc_norm, c, x_, y_, z_)
+        carry += c
+        acc += self.w_contrib(carry, c, x_, y_, z_)
 
         x_ -= dx
         c = self.contrib(pos, x_, y_, z_)
-        acc_norm += c
-        acc += self.w_contrib(acc_norm, c, x_, y_, z_)
+        carry += c
+        acc += self.w_contrib(carry, c, x_, y_, z_)
 
         y_ -= dy
         z_ -= dz
         c = self.contrib(pos, x_, y_, z_)
-        acc_norm += c
-        acc += self.w_contrib(acc_norm, c, x_, y_, z_)
+        carry += c
+        acc += self.w_contrib(carry, c, x_, y_, z_)
 
         x_ += dx
         c = self.contrib(pos, x_, y_, z_)
-        acc_norm += c
-        acc += self.w_contrib(acc_norm, c, x_, y_, z_)
+        carry += c
+        acc += self.w_contrib(carry, c, x_, y_, z_)
 
         y_ += dy
         c = self.contrib(pos, x_, y_, z_)
-        acc_norm += c
-        acc += self.w_contrib(acc_norm, c, x_, y_, z_)
+        carry += c
+        acc += self.w_contrib(carry, c, x_, y_, z_)
 
         x_ -= dx
         c = self.contrib(pos, x_, y_, z_)
-        acc_norm += c
-        acc += self.w_contrib(acc_norm, c, x_, y_, z_)
+        carry += c
+        acc += self.w_contrib(carry, c, x_, y_, z_)
 
-        return acc, acc_norm
+        return acc, carry
 
     @ti.kernel
     def tonemap(self):
@@ -267,7 +268,7 @@ class Scene:
         """
 
         # NOTE: assuming an isotropic grid
-        cell_size = self.grid_node_pos[1, 0, 0] - self.grid_node_pos[1, 0, 0]
+        cell_size = (self.grid[1, 0, 0].pose - self.grid[0, 0, 0].pose).norm()
 
         for u, v in self.view_buffer:
             # Compute the initial ray direction
@@ -288,9 +289,10 @@ class Scene:
             norm_acc = 0.0
 
             # First, intersection
-            hit, close, diff = self.intersect(pos, ray)
+            close, diff = self.intersect(pos, ray)
+            pos = self.grid[close[0], close[1], close[2]].pose + diff
 
-            pos = self.grid_node_pos[close[0], close[1], close[2]] + diff
+            hit = diff.norm() < cell_size
 
             # After that, marching cubes
             while hit and steps < self.max_depth_ray:

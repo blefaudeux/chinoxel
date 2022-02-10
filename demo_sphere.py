@@ -48,7 +48,7 @@ def get_scene():
     # Settings here are completely arbitrary
     n_nodes = 20
     resolution = (800, 800)
-    focal = 1 / resolution[0]
+    focal = 1.0 / resolution[0]
     scene = Scene(
         grid_size=(n_nodes, n_nodes, n_nodes),
         resolution=resolution,
