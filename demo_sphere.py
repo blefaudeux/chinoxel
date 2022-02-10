@@ -5,7 +5,7 @@ import taichi as ti
 @ti.kernel
 def write_circle(buffer: ti.template(), circle_radius: float):
     center = ti.Vector([buffer.shape[0] / 2.0, buffer.shape[1] / 2.0])
-    sq_radius = circle_radius**2
+    sq_radius = circle_radius ** 2
 
     for u, v in buffer:
         pos = ti.Vector([u, v], dt=ti.float32) - center
@@ -53,7 +53,7 @@ def get_scene():
         grid_size=(n_nodes, n_nodes, n_nodes),
         resolution=resolution,
         focal=focal,
-        max_depth_ray=5,
+        max_depth_ray=3,
         LR=0.1,
     )
 

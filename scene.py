@@ -26,11 +26,7 @@ class Scene:
         # TODO: follow up we should store spherical harmonics
 
         self.grid = ti.Struct.field(
-            {
-                "color": ti.types.vector(3, ti.f32),
-                "opacity": ti.f32,
-            },
-            shape=grid_size,
+            {"color": ti.types.vector(3, ti.f32), "opacity": ti.f32,}, shape=grid_size,
         )
         self.grid.color.fill(0.0)  # this is legit in taichi, and pretty wunderbar
         self.grid.opacity.fill(1.0)
@@ -102,13 +98,7 @@ class Scene:
         u_ = u - ti.static(self.res[0] / 2)
         v_ = v - ti.static(self.res[1] / 2)
 
-        d = ti.Matrix(
-            [
-                -self.focal * u_,
-                -self.focal * v_,
-                -1.0,
-            ]
-        )
+        d = ti.Matrix([-self.focal * u_, -self.focal * v_, -1.0,])
         d = d.normalized()
 
         # Matmul with the camera pose to move to the reference coordinate
@@ -117,7 +107,7 @@ class Scene:
 
     @ti.func
     def closest_node(self, pose, ray):
-        """Return the element of the grid which is the closest to this position
+        """Return the element of the grid which is the next closest to the ray
 
         ..note: this could be computed in one go with linear algebra,
             probably sub optimal
@@ -155,37 +145,75 @@ class Scene:
         return min_dist < INF, x_min, y_min, z_min, diff_min
 
     @ti.func
-    def interpolate(self, x, y, z, diff):
-        # Very basic, average the contributions from the 8 closest nodes
-        dx = (
-            1 if diff[0] > 0 else -1
-        )  # TODO: rewrite as .normalize().round() or something
+    def contrib(self, pos, x, y, z):
+        dist = (pos - self.grid_node_pos[x, y, z]).norm()
+
+        return self.grid[x, y, z].opacity * dist
+
+    @ti.func
+    def w_contrib(self, norm, c, x, y, z):
+        return ti.exp(-norm) * (1.0 - ti.exp(-c)) * self.grid[x, y, z].color
+
+    @ti.func
+    def interpolate(self, x, y, z, pos, acc_norm):
+        # Find the 8 closest nodes
+        # we have the indices of the closest node, and the point where the
+        # ray is right now
+        ref_node = self.grid_node_pos[x, y, z]
+        diff = pos - ref_node
+
+        dx = 1 if diff[0] > 0 else -1
         dy = 1 if diff[1] > 0 else -1
         dz = 1 if diff[2] > 0 else -1
 
-        acc = ti.Vector(
-            [
-                0.0,
-                0.0,
-                0.0,
-            ]
-        )
+        # 8 closest nodes are:
+        # NOTE: This is a bit verbose, but completely unrolled and
+        # only touches the right parts, should not be too bad
+        acc = ti.Vector([0.0, 0.0, 0.0,])
 
         # TODO: Rewrite, this is horrible
         x_, y_, z_ = x, y, z
-        acc += 0.125 * self.grid[x_, y_, z_].color * self.grid[x_, y_, z_].opacity
-        x_ = min(max(x + dx, 0), self.grid.shape[0])
-        acc += 0.125 * self.grid[x_, y_, z_].color * self.grid[x_, y_, z_].opacity
-        y_ = min(max(y + dy, 0), self.grid.shape[1])
-        acc += 0.125 * self.grid[x_, y_, z_].color * self.grid[x_, y_, z_].opacity
-        z_ = min(max(z + dz, 0), self.grid.shape[2])
-        acc += 0.125 * self.grid[x_, y_, z_].color * self.grid[x_, y_, z_].opacity
-        x_ = min(max(x - dx, 0), self.grid.shape[0])
-        acc += 0.125 * self.grid[x_, y_, z_].color * self.grid[x_, y_, z_].opacity
-        y_ = min(max(y - dy, 0), self.grid.shape[1])
-        acc += 0.125 * self.grid[x_, y_, z_].color * self.grid[x_, y_, z_].opacity
+        c = self.contrib(pos, x_, y_, z_)
+        acc_norm += c
+        acc += self.w_contrib(acc_norm, c, x_, y_, z_)
 
-        return acc
+        x_ += dx
+        c = self.contrib(pos, x_, y_, z_)
+        acc_norm += c
+        acc += self.w_contrib(acc_norm, c, x_, y_, z_)
+
+        y_ += dy
+        c = self.contrib(pos, x_, y_, z_)
+        acc_norm += c
+        acc += self.w_contrib(acc_norm, c, x_, y_, z_)
+
+        x_ -= dx
+        c = self.contrib(pos, x_, y_, z_)
+        acc_norm += c
+        acc += self.w_contrib(acc_norm, c, x_, y_, z_)
+
+        y_ -= dy
+        z_ -= dz
+        c = self.contrib(pos, x_, y_, z_)
+        acc_norm += c
+        acc += self.w_contrib(acc_norm, c, x_, y_, z_)
+
+        x_ += dx
+        c = self.contrib(pos, x_, y_, z_)
+        acc_norm += c
+        acc += self.w_contrib(acc_norm, c, x_, y_, z_)
+
+        y_ += dy
+        c = self.contrib(pos, x_, y_, z_)
+        acc_norm += c
+        acc += self.w_contrib(acc_norm, c, x_, y_, z_)
+
+        x_ -= dx
+        c = self.contrib(pos, x_, y_, z_)
+        acc_norm += c
+        acc += self.w_contrib(acc_norm, c, x_, y_, z_)
+
+        return acc, acc_norm
 
     @ti.kernel
     def tonemap(self):
@@ -194,13 +222,15 @@ class Scene:
         Could be worth it applying a gamma curve for instance
         """
         for i, j in self.view_buffer:
-            self.view_buffer[i, j] = self.view_buffer[i, j] / self.max_depth_ray
+            self.view_buffer[i, j] = ti.sqrt(self.view_buffer[i, j])
 
     @ti.kernel
     def render(self):
         """
         Given a camera pose, generate the corresponding view
         """
+
+        cell_size = self.grid_node_pos[1, 0, 0] - self.grid_node_pos[1, 0, 0]
 
         for u, v in self.view_buffer:
             # Compute the initial ray direction
@@ -211,27 +241,27 @@ class Scene:
                     self.camera_pose[0, 0][2, 3],
                 ]
             )
-            d = self.get_ray(u, v)
+            ray = self.get_ray(u, v)
 
             # Ray marching variables
             hit, steps = True, 0
-            colour_acc = ti.Vector(
-                [
-                    0.0,
-                    0.0,
-                    0.0,
-                ]
-            )
+            colour_acc = ti.Vector([0.0, 0.0, 0.0,])
+            norm_acc = 0.0
 
             while hit and steps < self.max_depth_ray:
                 # Raymarch, find the next "hit"
-                hit, x, y, z, diff = self.closest_node(pos, d)
+                hit, x, y, z, diff = self.closest_node(pos, ray)
 
                 if hit:
-                    colour_acc += self.interpolate(x, y, z, diff)
-
-                    # Update the position and keep going
+                    # Update the position
                     pos = self.grid_node_pos[x, y, z] + diff
+
+                    # Interpolate the colour around this newfound position
+                    contrib, norm_acc = self.interpolate(x, y, z, pos, norm_acc)
+                    colour_acc += contrib
+
+                    # Move to the next cell
+                    pos += cell_size * ray
 
                 steps += 1
 

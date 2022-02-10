@@ -1,5 +1,8 @@
 # chinoxel
 
+Trying to implement [Plenoxels](https://alexyu.net/plenoxels/) using [Taichi](https://docs.taichi.graphics/). Reimplementing from scratch as a comprehension exercise, not looking at the original code. First project with Taichi so a lot of parts may not be very idiomatic.. 
+
+
 TODOs:
 
 - [x] General framework (grid/render/compare with views/optimize)
