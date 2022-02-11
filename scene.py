@@ -39,7 +39,13 @@ class Scene:
         self.grid_size = grid_size
 
         # Render view
-        self.camera_pose = ti.Matrix.field(4, 4, dtype=ti.f32, shape=(1, 1))
+        self.camera_pose = ti.Struct(
+            {
+                "rotation": ti.Matrix.field(3, 3, ti.f32, shape=1),
+                "translation": ti.Vector.field(3, ti.f32, shape=1),
+            }
+        )
+
         self.view_buffer = ti.Vector.field(n=3, dtype=ti.f32, shape=resolution)
 
         self.reference_buffer = None
@@ -72,15 +78,11 @@ class Scene:
             ) / scale
 
         # Init the camera pose matrix
-        # NOTE: This will be overwritten when optimizing for {view/poses}
-        self.camera_pose[0, 0] = ti.Matrix(
-            [
-                [1.0, 0.0, 0.0, 0.0],
-                [0.0, 1.0, 0.0, 0.0],
-                [0.0, 0.0, 1.0, 3.0],
-                [0.0, 0.0, 0.0, 0.0],
-            ]
+        self.camera_pose.rotation[0] = ti.Matrix(
+            [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0],]
         )
+
+        self.camera_pose.translation[0] = ti.Vector([0.0, 0.0, 3.0])
 
     @ti.func
     def get_ray(self, u, v):
@@ -100,11 +102,11 @@ class Scene:
         u_ = u - ti.static(self.res[0] / 2)
         v_ = v - ti.static(self.res[1] / 2)
 
-        d = ti.Matrix([-self.focal * u_, -self.focal * v_, -1.0,])
+        d = ti.Matrix([-self.focal * u_, -self.focal * v_, -1.0])
         d = d.normalized()
 
         # Matmul with the camera pose to move to the reference coordinate
-        # d_cam = self.camera_pose[0, 0] @ d  # FIXME
+        d = self.camera_pose.rotation[0] @ d
         return d
 
     @ti.func
@@ -211,44 +213,44 @@ class Scene:
         x_, y_, z_ = close[0], close[1], close[2]
 
         c = self.contrib(pos, x_, y_, z_)
-        carry += c
         acc += self.w_contrib(carry, c, x_, y_, z_)
+        carry += c
 
         x_ += dx
         c = self.contrib(pos, x_, y_, z_)
-        carry += c
         acc += self.w_contrib(carry, c, x_, y_, z_)
+        carry += c
 
         y_ += dy
         c = self.contrib(pos, x_, y_, z_)
-        carry += c
         acc += self.w_contrib(carry, c, x_, y_, z_)
+        carry += c
 
         x_ -= dx
         c = self.contrib(pos, x_, y_, z_)
-        carry += c
         acc += self.w_contrib(carry, c, x_, y_, z_)
+        carry += c
 
         y_ -= dy
         z_ -= dz
         c = self.contrib(pos, x_, y_, z_)
-        carry += c
         acc += self.w_contrib(carry, c, x_, y_, z_)
+        carry += c
 
         x_ += dx
         c = self.contrib(pos, x_, y_, z_)
-        carry += c
         acc += self.w_contrib(carry, c, x_, y_, z_)
+        carry += c
 
         y_ += dy
         c = self.contrib(pos, x_, y_, z_)
-        carry += c
         acc += self.w_contrib(carry, c, x_, y_, z_)
+        carry += c
 
         x_ -= dx
         c = self.contrib(pos, x_, y_, z_)
-        carry += c
         acc += self.w_contrib(carry, c, x_, y_, z_)
+        carry += c
 
         return acc, carry
 
@@ -272,13 +274,7 @@ class Scene:
 
         for u, v in self.view_buffer:
             # Compute the initial ray direction
-            pos = ti.Vector(
-                [
-                    self.camera_pose[0, 0][0, 3],
-                    self.camera_pose[0, 0][1, 3],
-                    self.camera_pose[0, 0][2, 3],
-                ]
-            )
+            pos = self.camera_pose.translation[0]
             ray = self.get_ray(u, v)
             ray_abs_max = ti.max(ray.max(), -ray.min())
             ray_step = ray / ray_abs_max * cell_size  # unitary on one direction
