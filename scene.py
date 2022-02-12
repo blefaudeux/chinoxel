@@ -1,5 +1,6 @@
 import taichi as ti
 from typing import Tuple, List
+import math
 
 
 EPS = 1e-4
@@ -79,10 +80,40 @@ class Scene:
 
         # Init the camera pose matrix
         self.camera_pose.rotation[0] = ti.Matrix(
-            [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0],]
+            [
+                [1.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0],
+                [0.0, 0.0, 1.0],
+            ]
         )
 
         self.camera_pose.translation[0] = ti.Vector([0.0, 0.0, 3.0])
+
+    @ti.kernel
+    def orbital_inc_rotate(self):
+        inc = 1.0 / 180 * 3.1415  # 15 degrees ?
+
+        rotation_increment = ti.Matrix(
+            [
+                [
+                    ti.cos(inc),
+                    ti.sin(inc),
+                    0.0,
+                ],
+                [
+                    -ti.sin(inc),
+                    ti.cos(inc),
+                    0.0,
+                ],
+                [
+                    0.0,
+                    0.0,
+                    1.0,
+                ],
+            ]
+        )
+
+        self.camera_pose.rotation[0] = rotation_increment @ self.camera_pose.rotation[0]
 
     @ti.func
     def get_ray(self, u, v):
@@ -207,7 +238,13 @@ class Scene:
         # 8 closest nodes are:
         # NOTE: This is a bit verbose, but completely unrolled and
         # only touches the right parts, should not be too bad
-        acc = ti.Vector([0.0, 0.0, 0.0,])
+        acc = ti.Vector(
+            [
+                0.0,
+                0.0,
+                0.0,
+            ]
+        )
 
         # TODO: Rewrite, this is horrible
         x_, y_, z_ = close[0], close[1], close[2]
@@ -281,7 +318,13 @@ class Scene:
 
             # Ray marching variables
             steps = 0
-            colour_acc = ti.Vector([0.0, 0.0, 0.0,])
+            colour_acc = ti.Vector(
+                [
+                    0.0,
+                    0.0,
+                    0.0,
+                ]
+            )
             norm_acc = 0.0
 
             # First, intersection

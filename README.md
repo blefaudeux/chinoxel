@@ -1,6 +1,6 @@
 # chinoxel
 
-Trying to implement [Plenoxels](https://alexyu.net/plenoxels/) using [Taichi](https://docs.taichi.graphics/). Reimplementing from scratch as a comprehension exercise, not looking at the original code. First project with Taichi so a lot of parts may not be very idiomatic.. 
+Trying to implement [Plenoxels](https://alexyu.net/plenoxels/) using [Taichi](https://docs.taichi.graphics/). Reimplementing from scratch as a comprehension exercise, not looking at the original code. First project with Taichi so a lot of parts may not be very idiomatic..
 
 
 TODOs:
@@ -16,5 +16,5 @@ TODOs:
 - [x] Propagate rays over depth
 
 <p align="center">
-  <img src="chinoxel.png" width=600>
+  <img src="orbit.gif" width=480>
 </p>

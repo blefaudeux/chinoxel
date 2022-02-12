@@ -5,7 +5,7 @@ import taichi as ti
 @ti.kernel
 def write_circle(buffer: ti.template(), circle_radius: float):
     center = ti.Vector([buffer.shape[0] / 2.0, buffer.shape[1] / 2.0])
-    sq_radius = circle_radius ** 2
+    sq_radius = circle_radius**2
 
     for u, v in buffer:
         pos = ti.Vector([u, v], dt=ti.float32) - center
@@ -75,6 +75,7 @@ def demo_sphere_render():
         scene.tonemap()
         gui.set_image(scene.view_buffer)
         gui.show()
+        scene.orbital_inc_rotate()
 
 
 def demo_sphere_optimize(n_views: int = 10):
