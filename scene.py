@@ -9,7 +9,7 @@ INF = 1e10
 # Good resource:
 # https://yuanming.taichi.graphics/publication/2020-taichi-tutorial/taichi-tutorial.pdf
 
-_DEBUG = False
+_DEBUG = True
 
 
 @ti.data_oriented
@@ -24,7 +24,10 @@ class Scene:
     ):
 
         # For now just store [RGBA] in the grid
-        # TODO: follow up we should store spherical harmonics
+        # TODO:
+        # - follow up we should store spherical harmonics
+        # - follow up store in a sparse structure
+        # (see https://docs.taichi.graphics/lang/articles/advanced/sparse)
 
         self.grid = ti.Struct.field(
             {
@@ -33,6 +36,7 @@ class Scene:
                 "pose": ti.types.vector(3, ti.f32),
             },
             shape=grid_size,
+            needs_grad=True,
         )
         self.grid.color.fill(0.0)  # this is legit in taichi, and pretty wunderbar
         self.grid.opacity.fill(1.0)
@@ -42,14 +46,13 @@ class Scene:
         # Render view
         self.camera_pose = ti.Struct(
             {
-                "rotation": ti.Matrix.field(3, 3, ti.f32, shape=1),
-                "translation": ti.Vector.field(3, ti.f32, shape=1),
+                "rotation": ti.Matrix.field(3, 3, ti.f32, shape=()),
+                "translation": ti.Vector.field(3, ti.f32, shape=()),
             }
         )
 
         self.view_buffer = ti.Vector.field(n=3, dtype=ti.f32, shape=resolution)
-
-        self.reference_buffer = None
+        self.reference_buffer = ti.Vector.field(n=3, dtype=ti.f32, shape=resolution)
 
         self.max_depth_ray = max_depth_ray
         self.focal = focal
@@ -79,15 +82,11 @@ class Scene:
             ) / scale
 
         # Init the camera pose matrix
-        self.camera_pose.rotation[0] = ti.Matrix(
-            [
-                [1.0, 0.0, 0.0],
-                [0.0, 1.0, 0.0],
-                [0.0, 0.0, 1.0],
-            ]
+        self.camera_pose.rotation[None] = ti.Matrix(
+            [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0],]
         )
 
-        self.camera_pose.translation[0] = ti.Vector([0.0, 0.0, 3.0])
+        self.camera_pose.translation[None] = ti.Vector([0.0, 0.0, 3.0])
 
     @ti.kernel
     def orbital_inc_rotate(self):
@@ -95,25 +94,15 @@ class Scene:
 
         rotation_increment = ti.Matrix(
             [
-                [
-                    ti.cos(inc),
-                    ti.sin(inc),
-                    0.0,
-                ],
-                [
-                    -ti.sin(inc),
-                    ti.cos(inc),
-                    0.0,
-                ],
-                [
-                    0.0,
-                    0.0,
-                    1.0,
-                ],
+                [ti.cos(inc), ti.sin(inc), 0.0,],
+                [-ti.sin(inc), ti.cos(inc), 0.0,],
+                [0.0, 0.0, 1.0,],
             ]
         )
 
-        self.camera_pose.rotation[0] = rotation_increment @ self.camera_pose.rotation[0]
+        self.camera_pose.rotation[None] = (
+            rotation_increment @ self.camera_pose.rotation[None]
+        )
 
     @ti.func
     def get_ray(self, u, v):
@@ -137,7 +126,7 @@ class Scene:
         d = d.normalized()
 
         # Matmul with the camera pose to move to the reference coordinate
-        d = self.camera_pose.rotation[0] @ d
+        d = self.camera_pose.rotation[None] @ d
         return d
 
     @ti.func
@@ -238,13 +227,7 @@ class Scene:
         # 8 closest nodes are:
         # NOTE: This is a bit verbose, but completely unrolled and
         # only touches the right parts, should not be too bad
-        acc = ti.Vector(
-            [
-                0.0,
-                0.0,
-                0.0,
-            ]
-        )
+        acc = ti.Vector([0.0, 0.0, 0.0,])
 
         # TODO: Rewrite, this is horrible
         x_, y_, z_ = close[0], close[1], close[2]
@@ -295,7 +278,7 @@ class Scene:
     def tonemap(self):
         """
         For now, just normalized the rendered view.
-        Could be worth it applying a gamma curve for instance
+        Could be worth applying a gamma curve for instance
         """
         for i, j in self.view_buffer:
             self.view_buffer[i, j] = ti.sqrt(self.view_buffer[i, j])
@@ -306,25 +289,18 @@ class Scene:
         Given a camera pose, generate the corresponding view
         """
 
-        # NOTE: assuming an isotropic grid
-        cell_size = (self.grid[1, 0, 0].pose - self.grid[0, 0, 0].pose).norm()
-
         for u, v in self.view_buffer:
+            # NOTE: assuming an isotropic grid
+            cell_size = (self.grid[1, 0, 0].pose - self.grid[0, 0, 0].pose).norm()
+
             # Compute the initial ray direction
-            pos = self.camera_pose.translation[0]
+            pos = self.camera_pose.translation[None]
             ray = self.get_ray(u, v)
             ray_abs_max = ti.max(ray.max(), -ray.min())
             ray_step = ray / ray_abs_max * cell_size  # unitary on one direction
 
-            # Ray marching variables
-            steps = 0
-            colour_acc = ti.Vector(
-                [
-                    0.0,
-                    0.0,
-                    0.0,
-                ]
-            )
+            # # Ray marching variables
+            colour_acc = ti.Vector([0.0, 0.0, 0.0,])
             norm_acc = 0.0
 
             # First, intersection
@@ -334,7 +310,10 @@ class Scene:
             hit = diff.norm() < cell_size
 
             # After that, marching cubes
-            while hit and steps < self.max_depth_ray:
+            for steps in range(self.max_depth_ray):
+                if not hit:
+                    break
+
                 # Fetch the colour in between the 8 closest nodes
                 contrib, norm_acc = self.interpolate(close, pos, norm_acc)
                 colour_acc += contrib
@@ -360,7 +339,7 @@ class Scene:
             self.grid[x, y, z] -= self.grid.grad[x, y, z] * self.LR
 
     @ti.kernel
-    def compute_loss(self):
+    def reduce(self):
         """
         Given a reference view, create a loss by comparing it to the current view_buffer
 
@@ -369,16 +348,23 @@ class Scene:
         """
 
         for u, v in self.view_buffer:
-            self.loss[None] += (
-                self.view_buffer[u, v] - self.reference_buffer[u, v]
-            ) ** 2
+            self.view_buffer[u, v] -= self.reference_buffer[u, v]
 
-    def optimize(self, poses: List[ti.Matrix], views: List[ti.Vector], use_gui: False):  # type: ignore
+    @ti.kernel
+    def compute_loss(self):
         """
-        Given a set of views and corresponding poses, optimize the underlying scene
-        """
+        Given a reference view, create a loss by comparing it to the current view_buffer
 
-        assert len(poses) == len(views), "You must provide one camera pose per view"
+        .. note: this is most probably not optimal in terms of speed, this could be
+            rewritten as a matmultiplications
+        """
+        for u, v in self.view_buffer:
+            self.loss[None] += self.view_buffer[u, v].norm_sqr()
+
+    def optimize(self, use_gui: False):  # type: ignore
+        """
+        Adapt the current scene to the current reference_buffer
+        """
 
         if use_gui:
             gui = ti.GUI("Chinoxel", self.res, fast_gui=False)
@@ -390,33 +376,29 @@ class Scene:
         self.grid.fill(0.0)
 
         while not gui or gui.running:
-            for pose, view in zip(poses, views):
-                with ti.Tape(loss=self.loss):
-                    # project the grid on this viewpoint
-                    self.view_buffer.fill(0.0)
-                    self.camera_pose[0, 0] = pose[0, 0]
-                    self.render()
+            with ti.Tape(loss=self.loss):
+                self.render()
 
-                    # loss is this vs. the reference at that point
-                    self.reference_buffer = view
-                    self.compute_loss()
+                # loss is this vs. the reference at that point
+                self.reduce()
+                self.compute_loss()
 
-                # update the field
-                print("Loss: ", self.loss[None])
-                self.gradient_descent()
+            # update the field
+            print("Loss: ", self.loss[None])
+            # self.gradient_descent()
 
-                if _DEBUG:
-                    self.render()
-                    self.loss[None] = 0
-                    self.compute_loss()
-                    print("post loss: ", self.loss[None])
+            if _DEBUG:
+                self.render()
+                self.loss[None] = 0
+                self.compute_loss()
+                print("post loss: ", self.loss[None])
 
-                # dummy, show the current grid
-                if use_gui:
-                    gui.set_image(self.view_buffer)
-                    gui.show()
+            # dummy, show the current grid
+            if use_gui:
+                gui.set_image(self.view_buffer)
+                gui.show()
 
-                print("Frame processed")
+            print("Frame processed")
 
-                # TODO: sparsify ?
-                # TODO: Adjust LR ?
+            # TODO: sparsify ?
+            # TODO: Adjust LR ?
