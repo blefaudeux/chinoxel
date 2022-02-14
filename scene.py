@@ -22,6 +22,9 @@ class Scene:
         max_depth_ray: int,
         LR: float = 0.1,
     ):
+        assert (
+            grid_size[0] == grid_size[1] == grid_size[2]
+        ), "We only support isotropic grids for now"
 
         # For now just store [RGBA] in the grid
         # TODO:
@@ -165,6 +168,8 @@ class Scene:
                             diff_min = diff
                             x_min, y_min, z_min = x, y, z
 
+        # FIXME: autodiff dies here because this returns integers (node index) it seems
+        # and this was not considered.
         return ti.Vector([x_min, y_min, z_min]), diff_min
 
     @ti.func
@@ -230,55 +235,45 @@ class Scene:
         acc = ti.Vector([0.0, 0.0, 0.0,])
 
         # TODO: Rewrite, this is horrible
-        x_, y_, z_ = close[0], close[1], close[2]
+        c0 = self.contrib(pos, close[0], close[1], close[2])
+        acc += self.w_contrib(carry, c0, close[0], close[1], close[2])
+        carry += c0
 
-        c = self.contrib(pos, x_, y_, z_)
-        acc += self.w_contrib(carry, c, x_, y_, z_)
-        carry += c
+        # FIXME: The following breaks autodiff, not variable shadowing, not super clear why
+        c1 = self.contrib(pos, close[0] + dx, close[1], close[2])
+        acc += self.w_contrib(carry, c1, close[0] + dx, close[1], close[2])
+        carry += c1
 
-        x_ += dx
-        c = self.contrib(pos, x_, y_, z_)
-        acc += self.w_contrib(carry, c, x_, y_, z_)
-        carry += c
+        c2 = self.contrib(pos, close[0] + dx, close[1] + dy, close[2])
+        acc += self.w_contrib(carry, c2, close[0] + dx, close[1] + dy, close[2])
+        carry += c2
 
-        y_ += dy
-        c = self.contrib(pos, x_, y_, z_)
-        acc += self.w_contrib(carry, c, x_, y_, z_)
-        carry += c
+        c3 = self.contrib(pos, close[0], close[1] + dy, close[2])
+        acc += self.w_contrib(carry, c3, close[0], close[1] + dy, close[2])
+        carry += c3
 
-        x_ -= dx
-        c = self.contrib(pos, x_, y_, z_)
-        acc += self.w_contrib(carry, c, x_, y_, z_)
-        carry += c
+        c4 = self.contrib(pos, close[0], close[1], close[2] - dz)
+        acc += self.w_contrib(carry, c4, close[0], close[1], close[2] - dz)
+        carry += c4
 
-        y_ -= dy
-        z_ -= dz
-        c = self.contrib(pos, x_, y_, z_)
-        acc += self.w_contrib(carry, c, x_, y_, z_)
-        carry += c
+        c5 = self.contrib(pos, close[0] + dx, close[1], close[2] - dz)
+        acc += self.w_contrib(carry, c5, close[0] + dx, close[1], close[2] - dz)
+        carry += c5
 
-        x_ += dx
-        c = self.contrib(pos, x_, y_, z_)
-        acc += self.w_contrib(carry, c, x_, y_, z_)
-        carry += c
+        c6 = self.contrib(pos, close[0] + dx, close[1] + dy, close[2] - dz)
+        acc += self.w_contrib(carry, c6, close[0] + dx, close[1] + dy, close[2] - dz)
+        carry += c6
 
-        y_ += dy
-        c = self.contrib(pos, x_, y_, z_)
-        acc += self.w_contrib(carry, c, x_, y_, z_)
-        carry += c
-
-        x_ -= dx
-        c = self.contrib(pos, x_, y_, z_)
-        acc += self.w_contrib(carry, c, x_, y_, z_)
-        carry += c
+        c7 = self.contrib(pos, close[0], close[1] + dy, close[2] - dz)
+        acc += self.w_contrib(carry, c7, close[0], close[1] + dy, close[2] - dz)
+        carry += c7
 
         return acc, carry
 
     @ti.kernel
     def tonemap(self):
         """
-        For now, just normalized the rendered view.
-        Could be worth applying a gamma curve for instance
+        Could be worth applying a better gamma curve
         """
         for i, j in self.view_buffer:
             self.view_buffer[i, j] = ti.sqrt(self.view_buffer[i, j])
@@ -290,7 +285,6 @@ class Scene:
         """
 
         for u, v in self.view_buffer:
-            # NOTE: assuming an isotropic grid
             cell_size = (self.grid[1, 0, 0].pose - self.grid[0, 0, 0].pose).norm()
 
             # Compute the initial ray direction
@@ -306,7 +300,6 @@ class Scene:
             # First, intersection
             close, diff = self.intersect(pos, ray)
             pos = self.grid[close[0], close[1], close[2]].pose + diff
-
             hit = diff.norm() < cell_size
 
             # After that, marching cubes

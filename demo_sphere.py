@@ -72,7 +72,7 @@ def demo_sphere_render():
 
     while gui.running:
         scene.render()
-        scene.tonemap()
+        # scene.tonemap()
         gui.set_image(scene.view_buffer)
         gui.show()
         scene.orbital_inc_rotate()
@@ -91,7 +91,8 @@ def demo_sphere_optimize(n_views: int = 10):
 if __name__ == "__main__":
     ti.init(arch=ti.gpu)
 
-    demo_sphere_render()
-
-    # WIP
-    # demo_sphere_optimize()
+    if 1:
+        demo_sphere_render()
+    else:
+        # WIP - autodiff dies, trying to work around that
+        demo_sphere_optimize()
