@@ -1,3 +1,4 @@
+from xml.etree.ElementInclude import include
 import taichi as ti
 from typing import Tuple, List
 import math
@@ -39,7 +40,6 @@ class Scene:
                 "pose": ti.types.vector(3, ti.f32),
             },
             shape=grid_size,
-            needs_grad=True,
         )
         self.grid.color.fill(0.0)  # this is legit in taichi, and pretty wunderbar
         self.grid.opacity.fill(1.0)
@@ -66,6 +66,13 @@ class Scene:
         self.LR = LR
         self.loss = ti.field(dtype=ti.f32, shape=(), needs_grad=True)
 
+        # Manual gradient tracing
+        self.trace_rendering = False
+        self.grid_grad = ti.Struct.field(
+            {"color": ti.types.vector(3, ti.f32), "opacity": ti.f32,}, shape=grid_size,
+        )
+
+        self.euler = ti.Vector([0.0, 0.0, 0.0])
         self.init()
 
     @ti.kernel
@@ -75,9 +82,7 @@ class Scene:
         We arbitrarily constraint the grid to be smaller than [-1, 1]
         """
         center = ti.Vector(self.grid_size, ti.float32) / 2.0
-        scale = (
-            self.grid_size[0] / 2.0
-        )  # FIXME: the grid could have different sizes over different dimensions
+        scale = self.grid_size[0] / 2.0
 
         for x, y, z in self.grid:
             self.grid[x, y, z].pose = (
@@ -91,21 +96,51 @@ class Scene:
 
         self.camera_pose.translation[None] = ti.Vector([0.0, 0.0, 3.0])
 
-    @ti.kernel
-    def orbital_inc_rotate(self):
-        inc = 1.0 / 180 * 3.1415  # 15 degrees ?
-
-        rotation_increment = ti.Matrix(
+    @staticmethod
+    @ti.func
+    def get_matrix_from_euler(alpha, beta, gamma):
+        """
+        Euler angles are ill-defined, in that the effects depend on the rotation ordering.
+        We stick to an arbitrary order here
+        """
+        rotation_alpha = ti.Matrix(
             [
-                [ti.cos(inc), ti.sin(inc), 0.0,],
-                [-ti.sin(inc), ti.cos(inc), 0.0,],
+                [ti.cos(alpha), ti.sin(alpha), 0.0,],
+                [-ti.sin(alpha), ti.cos(alpha), 0.0,],
                 [0.0, 0.0, 1.0,],
             ]
         )
 
+        rotation_beta = ti.Matrix(
+            [
+                [1.0, 0.0, 0.0,],
+                [0.0, ti.cos(beta), ti.sin(beta),],
+                [0.0, -ti.sin(beta), ti.cos(beta),],
+            ]
+        )
+
+        rotation_gamma = ti.Matrix(
+            [
+                [ti.cos(gamma), 0.0, ti.sin(gamma),],
+                [0.0, 1.0, 0.0,],
+                [-ti.sin(gamma), 0.0, ti.cos(gamma)],
+            ]
+        )
+
+        return rotation_alpha @ rotation_beta @ rotation_gamma
+
+    @ti.kernel
+    def orbital_inc_rotate(self):
+        inc = 1.0 / 180 * 3.1415  # 15 degrees ?
+
+        rotation_increment = self.get_matrix_from_euler(inc, inc, 0.0)
+
         self.camera_pose.rotation[None] = (
             rotation_increment @ self.camera_pose.rotation[None]
         )
+
+        self.camera_pose.translation[None] = rotation_increment @ self.camera_pose.translation[None] 
+
 
     @ti.func
     def get_ray(self, u, v):
@@ -168,8 +203,6 @@ class Scene:
                             diff_min = diff
                             x_min, y_min, z_min = x, y, z
 
-        # FIXME: autodiff dies here because this returns integers (node index) it seems
-        # and this was not considered.
         return ti.Vector([x_min, y_min, z_min]), diff_min
 
     @ti.func
