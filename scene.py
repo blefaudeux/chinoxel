@@ -1,7 +1,5 @@
-from xml.etree.ElementInclude import include
 import taichi as ti
-from typing import Tuple, List
-import math
+from typing import Tuple
 
 
 EPS = 1e-4
@@ -79,7 +77,8 @@ class Scene:
     def init(self):
         """Fill in the grid coordinates, becomes read-only after that.
 
-        We arbitrarily constraint the grid to be smaller than [-1, 1]
+        We arbitrarily constraint the grid to be smaller than [-1, 1]. 
+        The whole space is normalized by convention
         """
         center = ti.Vector(self.grid_size, ti.float32) / 2.0
         scale = self.grid_size[0] / 2.0
@@ -100,7 +99,9 @@ class Scene:
     @ti.func
     def get_matrix_from_euler(alpha, beta, gamma):
         """
-        Euler angles are ill-defined, in that the effects depend on the rotation ordering.
+        Get a rotation matrix from the three euler angles 
+
+        ... note: Euler angles are ill-defined, in that the effects depend on the rotation ordering.
         We stick to an arbitrary order here
         """
         rotation_alpha = ti.Matrix(
@@ -131,6 +132,11 @@ class Scene:
 
     @ti.kernel
     def orbital_inc_rotate(self):
+        """
+        Rotate the grid by an angular increment.
+
+        ... note: The rotation axis is arbitrary, could probably passed as a param eventually 
+        """
         inc = 1.0 / 180 * 3.1415  # 15 degrees ?
 
         rotation_increment = self.get_matrix_from_euler(inc, inc, 0.0)
@@ -139,8 +145,9 @@ class Scene:
             rotation_increment @ self.camera_pose.rotation[None]
         )
 
-        self.camera_pose.translation[None] = rotation_increment @ self.camera_pose.translation[None] 
-
+        self.camera_pose.translation[None] = (
+            rotation_increment @ self.camera_pose.translation[None]
+        )
 
     @ti.func
     def get_ray(self, u, v):
@@ -205,6 +212,11 @@ class Scene:
 
         return ti.Vector([x_min, y_min, z_min]), diff_min
 
+    @staticmethod
+    @ti.func
+    def get_bounds(start, ceil):
+        return max(start - 1, 0), min(start + 1, ceil)
+
     @ti.func
     def closest_node(self, pose, previous_node):
         """Return the element of the grid which is the next closest to the ray
@@ -220,14 +232,10 @@ class Scene:
 
         X, Y, Z = self.grid_size
 
-        x_min = max(previous_node[0] - 1, 0)
-        x_max = min(previous_node[0] + 1, X)
-
-        y_min = max(previous_node[1] - 1, 0)
-        y_max = min(previous_node[1] + 1, Y)
-
-        z_min = max(previous_node[2] - 1, 0)
-        z_max = min(previous_node[2] + 1, Z)
+        x_, y_, z_ = previous_node[0], previous_node[1], previous_node[2]
+        x_min, x_max = self.get_bounds(x_, X)
+        y_min, y_max = self.get_bounds(y_, Y)
+        z_min, z_max = self.get_bounds(z_, Z)
 
         for x in range(x_min, x_max):
             for y in range(y_min, y_max):
@@ -237,9 +245,9 @@ class Scene:
                     # Now keep track of the node which is the closest
                     if dist < min_dist:
                         min_dist = dist
-                        x_min, y_min, z_min = x, y, z
+                        x_, y_, z_ = x, y, z
 
-        return min_dist < INF, ti.Vector([x_min, y_min, z_min], ti.i32)
+        return min_dist < INF, ti.Vector([x_, y_, z_], ti.i32)
 
     @ti.func
     def contrib(self, pos, x, y, z):
@@ -272,7 +280,6 @@ class Scene:
         acc += self.w_contrib(carry, c0, close[0], close[1], close[2])
         carry += c0
 
-        # FIXME: The following breaks autodiff, not variable shadowing, not super clear why
         c1 = self.contrib(pos, close[0] + dx, close[1], close[2])
         acc += self.w_contrib(carry, c1, close[0] + dx, close[1], close[2])
         carry += c1
@@ -344,6 +351,16 @@ class Scene:
                 contrib, norm_acc = self.interpolate(close, pos, norm_acc)
                 colour_acc += contrib
 
+                # Trace the rendering / gradients
+                if self.trace_rendering:
+                    # TODO:
+                    # log that `for this very pixel`
+                    # the contribution to the pixel value was $something
+                    # in terms of color and opacity
+
+                    # Up to 4 pixels to contribute to the gradient of a given node, probably ?
+                    pass
+
                 # Move to the next cell
                 pos = pos + ray_step  # Update the reference position
 
@@ -401,23 +418,18 @@ class Scene:
         # Put something in the grid, to make sure we get some gradient
         self.grid.fill(0.0)
 
-        while not gui or gui.running:
-            with ti.Tape(loss=self.loss):
-                self.render()
+        self.trace_rendering = True
 
-                # loss is this vs. the reference at that point
-                self.reduce()
-                self.compute_loss()
+        while not gui or gui.running:
+            self.render()
+
+            # loss is this vs. the reference at that point
+            self.reduce()
+            self.compute_loss()
 
             # update the field
             print("Loss: ", self.loss[None])
-            # self.gradient_descent()
-
-            if _DEBUG:
-                self.render()
-                self.loss[None] = 0
-                self.compute_loss()
-                print("post loss: ", self.loss[None])
+            self.gradient_descent()
 
             # dummy, show the current grid
             if use_gui:
@@ -428,3 +440,7 @@ class Scene:
 
             # TODO: sparsify ?
             # TODO: Adjust LR ?
+
+        # Make sure that future render calls are not traced by default
+        self.trace_rendering = False
+
