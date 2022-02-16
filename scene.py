@@ -1,3 +1,4 @@
+from re import X
 import taichi as ti
 from typing import Tuple
 
@@ -40,7 +41,7 @@ class Scene:
             shape=grid_size,
         )
         self.grid.color.fill(0.0)  # this is legit in taichi, and pretty wunderbar
-        self.grid.opacity.fill(1.0)
+        self.grid.opacity.fill(0.5)
 
         self.grid_size = grid_size
 
@@ -66,9 +67,22 @@ class Scene:
 
         # Manual gradient tracing
         self.trace_rendering = False
-        self.grid_grad = ti.Struct.field(
-            {"color": ti.types.vector(3, ti.f32), "opacity": ti.f32,}, shape=grid_size,
+
+        # WIP / store the grads pixel wise
+        # a problem is that multiple nodes can be touched, this is essentially a sparse
+        # [view buffer x grid] pairing, not sure how to store this efficiently enough
+
+        # ...note taichi sparse structure may be be a good option
+        # https://docs.taichi.graphics/zh-Hans/lang/articles/misc/internal#data-structure-organization
+        self.per_pix_grad = ti.Struct.field(
+            {
+                "color": ti.types.vector(3, ti.f32),
+                "opacity": ti.f32,
+                "pose": ti.types.vector(3, ti.i32),
+            },
+            shape=resolution,
         )
+        self.reset_grads()
 
         self.euler = ti.Vector([0.0, 0.0, 0.0])
         self.init()
@@ -250,65 +264,33 @@ class Scene:
         return min_dist < INF, ti.Vector([x_, y_, z_], ti.i32)
 
     @ti.func
-    def contrib(self, pos, x, y, z):
+    def d_contrib(self, pos, x, y, z):
         dist = (pos - self.grid[x, y, z].pose).norm()
 
         return self.grid[x, y, z].opacity * dist
 
     @ti.func
-    def w_contrib(self, norm, c, x, y, z):
+    def c_contrib(self, norm, c, x, y, z):
         return ti.exp(-norm) * (1.0 - ti.exp(-c)) * self.grid[x, y, z].color
 
     @ti.func
-    def interpolate(self, close, pos, carry):
-        # Find the 8 closest nodes
-        # we have the indices of the closest node, and the point where the
-        # ray is right now
-        diff = pos - self.grid[close[0], close[1], close[2]].pose
+    def interpolate(self, close, pos, acc, carry):
+        distance_contrib = self.d_contrib(pos, close[0], close[1], close[2])
+        color_contrib = self.c_contrib(
+            carry, distance_contrib, close[0], close[1], close[2]
+        )
 
-        dx = 1 if diff[0] > 0 else -1
-        dy = 1 if diff[1] > 0 else -1
-        dz = 1 if diff[2] > 0 else -1
+        acc += color_contrib * self.grid[close[0], close[1], close[2]].color
+        carry += distance_contrib
 
-        # 8 closest nodes are:
-        # NOTE: This is a bit verbose, but completely unrolled and
-        # only touches the right parts, should not be too bad
-        acc = ti.Vector([0.0, 0.0, 0.0,])
+        return acc, carry, distance_contrib, color_contrib
 
-        # TODO: Rewrite, this is horrible
-        c0 = self.contrib(pos, close[0], close[1], close[2])
-        acc += self.w_contrib(carry, c0, close[0], close[1], close[2])
-        carry += c0
+    def reset_grads(self):
+        self.per_pix_grad.color.fill(0.0)
+        self.per_pix_grad.opacity.fill(0.0)
+        self.per_pix_grad.pose.fill(-1)
 
-        c1 = self.contrib(pos, close[0] + dx, close[1], close[2])
-        acc += self.w_contrib(carry, c1, close[0] + dx, close[1], close[2])
-        carry += c1
-
-        c2 = self.contrib(pos, close[0] + dx, close[1] + dy, close[2])
-        acc += self.w_contrib(carry, c2, close[0] + dx, close[1] + dy, close[2])
-        carry += c2
-
-        c3 = self.contrib(pos, close[0], close[1] + dy, close[2])
-        acc += self.w_contrib(carry, c3, close[0], close[1] + dy, close[2])
-        carry += c3
-
-        c4 = self.contrib(pos, close[0], close[1], close[2] - dz)
-        acc += self.w_contrib(carry, c4, close[0], close[1], close[2] - dz)
-        carry += c4
-
-        c5 = self.contrib(pos, close[0] + dx, close[1], close[2] - dz)
-        acc += self.w_contrib(carry, c5, close[0] + dx, close[1], close[2] - dz)
-        carry += c5
-
-        c6 = self.contrib(pos, close[0] + dx, close[1] + dy, close[2] - dz)
-        acc += self.w_contrib(carry, c6, close[0] + dx, close[1] + dy, close[2] - dz)
-        carry += c6
-
-        c7 = self.contrib(pos, close[0], close[1] + dy, close[2] - dz)
-        acc += self.w_contrib(carry, c7, close[0], close[1] + dy, close[2] - dz)
-        carry += c7
-
-        return acc, carry
+        self.loss[None] = 0.0
 
     @ti.kernel
     def tonemap(self):
@@ -324,9 +306,9 @@ class Scene:
         Given a camera pose, generate the corresponding view
         """
 
-        for u, v in self.view_buffer:
-            cell_size = (self.grid[1, 0, 0].pose - self.grid[0, 0, 0].pose).norm()
+        cell_size = (self.grid[1, 0, 0].pose - self.grid[0, 0, 0].pose).norm()
 
+        for u, v in self.view_buffer:
             # Compute the initial ray direction
             pos = self.camera_pose.translation[None]
             ray = self.get_ray(u, v)
@@ -348,18 +330,63 @@ class Scene:
                     break
 
                 # Fetch the colour in between the 8 closest nodes
-                contrib, norm_acc = self.interpolate(close, pos, norm_acc)
-                colour_acc += contrib
+                # we have the indices of the closest node, and the point where the
+                # ray is right now
+                diff = pos - self.grid[close[0], close[1], close[2]].pose
+
+                dx = 1 if diff[0] > 0 else -1
+                dy = 1 if diff[1] > 0 else -1
+                dz = 1 if diff[2] > 0 else -1
+
+                colour_acc, norm_acc, dc, cc = self.interpolate(
+                    close, pos, colour_acc, norm_acc
+                )
 
                 # Trace the rendering / gradients
                 if self.trace_rendering:
-                    # TODO:
-                    # log that `for this very pixel`
-                    # the contribution to the pixel value was $something
-                    # in terms of color and opacity
+                    # FIXME: log contributions for all the nodes touched
+                    # in a sparse structure
 
-                    # Up to 4 pixels to contribute to the gradient of a given node, probably ?
-                    pass
+                    # Log the grad for the first node for now
+                    # TODO: check the formulas, these are probably wrong
+                    self.per_pix_grad[u, v].pose = close
+                    self.per_pix_grad[u, v].opacity = dc
+                    self.per_pix_grad[u, v].color = cc
+
+                close[0] += dx
+                colour_acc, norm_acc, dc, cc = self.interpolate(
+                    close, pos, colour_acc, norm_acc
+                )
+
+                close[1] += dy
+                colour_acc, norm_acc, dc, cc = self.interpolate(
+                    close, pos, colour_acc, norm_acc
+                )
+
+                close[0] -= dx
+                colour_acc, norm_acc, dc, cc = self.interpolate(
+                    close, pos, colour_acc, norm_acc
+                )
+
+                close[2] += dz
+                colour_acc, norm_acc, dc, cc = self.interpolate(
+                    close, pos, colour_acc, norm_acc
+                )
+
+                close[0] += dx
+                colour_acc, norm_acc, dc, cc = self.interpolate(
+                    close, pos, colour_acc, norm_acc
+                )
+
+                close[1] -= dy
+                colour_acc, norm_acc, dc, cc = self.interpolate(
+                    close, pos, colour_acc, norm_acc
+                )
+
+                close[0] -= dx
+                colour_acc, norm_acc, dc, cc = self.interpolate(
+                    close, pos, colour_acc, norm_acc
+                )
 
                 # Move to the next cell
                 pos = pos + ray_step  # Update the reference position
@@ -378,8 +405,14 @@ class Scene:
         Given the computed gradient, adjust all the elements of the grid
         .. note: worth implementing some momentum ?
         """
-        for x, y, z in self.grid:
-            self.grid[x, y, z] -= self.grid.grad[x, y, z] * self.LR
+
+        for u, v in self.per_pix_grad:
+            x, y, z = self.per_pix_grad[u, v].pose
+            if x > 0:
+                ti.atomic_sub(self.grid[x, y, z].color, self.per_pix_grad[u, v].color)
+                ti.atomic_sub(
+                    self.grid[x, y, z].opacity, self.per_pix_grad[u, v].opacity
+                )
 
     @ti.kernel
     def reduce(self):
@@ -391,18 +424,14 @@ class Scene:
         """
 
         for u, v in self.view_buffer:
-            self.view_buffer[u, v] -= self.reference_buffer[u, v]
+            diff = self.view_buffer[u, v] - self.reference_buffer[u, v]
+            self.loss[None] += diff.norm_sqr()
 
-    @ti.kernel
-    def compute_loss(self):
-        """
-        Given a reference view, create a loss by comparing it to the current view_buffer
+            self.per_pix_grad[u, v].color[0] *= diff[0] * self.LR
+            self.per_pix_grad[u, v].color[1] *= diff[1] * self.LR
+            self.per_pix_grad[u, v].color[2] *= diff[2] * self.LR
 
-        .. note: this is most probably not optimal in terms of speed, this could be
-            rewritten as a matmultiplications
-        """
-        for u, v in self.view_buffer:
-            self.loss[None] += self.view_buffer[u, v].norm_sqr()
+            self.per_pix_grad[u, v].opacity *= diff.norm() * self.LR
 
     def optimize(self, use_gui: False):  # type: ignore
         """
@@ -415,17 +444,17 @@ class Scene:
         else:
             gui = None
 
-        # Put something in the grid, to make sure we get some gradient
-        self.grid.fill(0.0)
+        # Put something in the grid, whatever
+        # self.grid.fill(0.0)
 
         self.trace_rendering = True
 
         while not gui or gui.running:
+            self.reset_grads()
             self.render()
 
             # loss is this vs. the reference at that point
             self.reduce()
-            self.compute_loss()
 
             # update the field
             print("Loss: ", self.loss[None])

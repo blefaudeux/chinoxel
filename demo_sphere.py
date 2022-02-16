@@ -13,7 +13,7 @@ def write_circle(buffer: ti.template(), circle_radius: float):
         if sq_norm > sq_radius:
             buffer[u, v] = ti.Vector([0.0, 0.0, 0.0])
         else:
-            buffer[u, v] = ti.Vector([0.0, 0.0, 0.0])
+            buffer[u, v] = ti.Vector([1.0, 1.0, 0.0])
 
 
 @ti.kernel
@@ -72,14 +72,13 @@ def demo_sphere_render():
 
     while gui.running:
         scene.render()
-        # scene.tonemap()
         gui.set_image(scene.view_buffer)
         gui.show()
         scene.orbital_inc_rotate()
 
 
-def demo_sphere_optimize(n_views: int = 10):
-    scene, resolution = get_scene()
+def demo_sphere_optimize():
+    scene, _ = get_scene()
 
     # Generate the synthetic view
     write_circle(scene.reference_buffer, 100.0)
