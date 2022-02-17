@@ -1,7 +1,7 @@
-from re import X
 import taichi as ti
 from typing import Tuple
 
+from geometry import get_matrix_from_euler
 
 EPS = 1e-4
 INF = 1e10
@@ -9,7 +9,13 @@ INF = 1e10
 # Good resource:
 # https://yuanming.taichi.graphics/publication/2020-taichi-tutorial/taichi-tutorial.pdf
 
-_DEBUG = True
+
+# Remove taichi compiler intrinsics from the stack trace
+_dev = True
+if _dev:
+    import sys
+
+    sys.tracebacklimit = 0
 
 
 @ti.data_oriented
@@ -68,30 +74,38 @@ class Scene:
         # Manual gradient tracing
         self.trace_rendering = False
 
-        # WIP / store the grads pixel wise
-        # a problem is that multiple nodes can be touched, this is essentially a sparse
-        # [view buffer x grid] pairing, not sure how to store this efficiently enough
-
-        # ...note taichi sparse structure may be be a good option
-        # https://docs.taichi.graphics/zh-Hans/lang/articles/misc/internal#data-structure-organization
-        self.per_pix_grad = ti.Struct.field(
-            {
-                "color": ti.types.vector(3, ti.f32),
-                "opacity": ti.f32,
-                "pose": ti.types.vector(3, ti.i32),
-            },
-            shape=resolution,
+        # Store the grid gradients.
+        # This will be fused with the rendering computation if `trace_rendering` is set
+        # Note that several kernels can concurrently increment the grid gradient,
+        # so write accesses need to be atomic
+        self.grid_grad = ti.Struct.field(
+            {"color": ti.types.vector(3, ti.f32), "opacity": ti.f32, "valid": ti.i8},
+            shape=grid_size,
         )
-        self.reset_grads()
 
-        self.euler = ti.Vector([0.0, 0.0, 0.0])
+        # Allocate the stack which will host the backward tracing
+        # Keep this sparse on purpose, at any point in time most of these
+        # will be empty
+        self.grad_stack = ti.root.pointer(ti.ij, resolution)
+        grad_node = ti.Struct.field(
+            {
+                "color_grad": ti.f32,
+                "opacity_grad": ti.f32,
+                "pose": ti.types.vector(3, ti.i32),
+            }
+        )
+        max_node_callstack = 8 * self.max_depth_ray
+        self.node_grads = self.grad_stack.dense(ti.i, (max_node_callstack))
+        self.node_grads.place(grad_node)
+
+        self.reset_grads()
         self.init()
 
     @ti.kernel
     def init(self):
         """Fill in the grid coordinates, becomes read-only after that.
 
-        We arbitrarily constraint the grid to be smaller than [-1, 1]. 
+        We arbitrarily constraint the grid to be smaller than [-1, 1].
         The whole space is normalized by convention
         """
         center = ti.Vector(self.grid_size, ti.float32) / 2.0
@@ -109,51 +123,16 @@ class Scene:
 
         self.camera_pose.translation[None] = ti.Vector([0.0, 0.0, 3.0])
 
-    @staticmethod
-    @ti.func
-    def get_matrix_from_euler(alpha, beta, gamma):
-        """
-        Get a rotation matrix from the three euler angles 
-
-        ... note: Euler angles are ill-defined, in that the effects depend on the rotation ordering.
-        We stick to an arbitrary order here
-        """
-        rotation_alpha = ti.Matrix(
-            [
-                [ti.cos(alpha), ti.sin(alpha), 0.0,],
-                [-ti.sin(alpha), ti.cos(alpha), 0.0,],
-                [0.0, 0.0, 1.0,],
-            ]
-        )
-
-        rotation_beta = ti.Matrix(
-            [
-                [1.0, 0.0, 0.0,],
-                [0.0, ti.cos(beta), ti.sin(beta),],
-                [0.0, -ti.sin(beta), ti.cos(beta),],
-            ]
-        )
-
-        rotation_gamma = ti.Matrix(
-            [
-                [ti.cos(gamma), 0.0, ti.sin(gamma),],
-                [0.0, 1.0, 0.0,],
-                [-ti.sin(gamma), 0.0, ti.cos(gamma)],
-            ]
-        )
-
-        return rotation_alpha @ rotation_beta @ rotation_gamma
-
     @ti.kernel
     def orbital_inc_rotate(self):
         """
         Rotate the grid by an angular increment.
 
-        ... note: The rotation axis is arbitrary, could probably passed as a param eventually 
+        ... note: The rotation axis is arbitrary, could probably passed as a param eventually
         """
         inc = 1.0 / 180 * 3.1415  # 15 degrees ?
 
-        rotation_increment = self.get_matrix_from_euler(inc, inc, 0.0)
+        rotation_increment = get_matrix_from_euler(inc, inc, 0.0)
 
         self.camera_pose.rotation[None] = (
             rotation_increment @ self.camera_pose.rotation[None]
@@ -162,6 +141,23 @@ class Scene:
         self.camera_pose.translation[None] = (
             rotation_increment @ self.camera_pose.translation[None]
         )
+
+    def reset_grads(self):
+        self.grid_grad.color.fill(0.0)
+        self.grid_grad.opacity.fill(0.0)
+        self.grid_grad.valid.fill(0)
+        self.loss[None] = 0.0
+
+    @ti.kernel
+    def tonemap(self):
+        """
+        Tonemap the render buffer, optional
+
+        ... note: Could be worth applying a better gamma curve, maybe reset black level, ..
+        """
+
+        for i, j in self.view_buffer:
+            self.view_buffer[i, j] = ti.sqrt(self.view_buffer[i, j])
 
     @ti.func
     def get_ray(self, u, v):
@@ -186,45 +182,54 @@ class Scene:
 
         # Matmul with the camera pose to move to the reference coordinate
         d = self.camera_pose.rotation[None] @ d
-        return d
+        return d.normalized()
 
     @ti.func
     def intersect(self, pose, ray):
         """Return the element of the grid which is the closest to the ray
 
-        ..note: this could be computed in one go with linear algebra,
+        ... note: this could be computed in one go with linear algebra,
             probably sub optimal
 
-        .. note: instead of computing all the distances,
+        ... note: instead of computing all the distances,
             probably that some hierarchical partitioning would be faster
         """
 
-        min_dist = INF
-        x_min, y_min, z_min = -1, -1, -1
+        cell_size = 0.5 * (self.grid[0, 0, 0].pose - self.grid[0, 0, 1].pose).norm_sqr()
+
+        min_proj = INF
+        i_min = ti.Vector([-1, -1, -1])
+        diff_vec_min = ti.Vector([0.0, 0.0, 0.0])
 
         # - Batch compute all the directions to the nodes
-        diff_min = ti.Vector([0.0, 0.0, 0.0])
-
-        for x in range(self.grid_size[0]):
+        for x in range(self.grid_size[0]):  # this will be parallelized
             for y in range(self.grid_size[1]):
                 for z in range(self.grid_size[2]):
+                    if self.grid[x, y, z].opacity == 0.0:
+                        continue
 
                     # Compute the direct line of sight, then offset
                     line_of_sight = self.grid[x, y, z].pose - pose
-                    proj = line_of_sight.dot(ray)
+                    projection = line_of_sight.dot(ray)
 
                     # Check that this point is not backwards
-                    if proj > 0.0:
-                        diff = proj * ray - line_of_sight
-                        diff_norm = diff.norm()
+                    if projection > 0.0:
+                        # This the the distance to the node, but it cannot be a good metric
+                        # for an intersection alone,
+                        # since it could be at the back of the grid for all we know.
+
+                        # So we use the distance to this shortest path to find the
+                        # node that this ray first interacts with
+                        diff_vec = projection * ray - line_of_sight
+                        diff = diff_vec.norm_sqr()
 
                         # Now keep track of the node which is the closest
-                        if diff_norm < min_dist:
-                            min_dist = diff_norm
-                            diff_min = diff
-                            x_min, y_min, z_min = x, y, z
+                        if diff < cell_size and projection < min_proj:
+                            min_proj = projection
+                            diff_vec_min = diff_vec
+                            i_min = ti.Vector([x, y, z])
 
-        return ti.Vector([x_min, y_min, z_min]), diff_min
+        return i_min, diff_vec_min
 
     @staticmethod
     @ti.func
@@ -235,10 +240,10 @@ class Scene:
     def closest_node(self, pose, previous_node):
         """Return the element of the grid which is the next closest to the ray
 
-        ..note: this could be computed in one go with linear algebra,
+        ... note: this could be computed in one go with linear algebra,
             probably sub optimal
 
-        .. note: instead of computing all the distances,
+        ... note: instead of computing all the distances,
             probably that some hierarchical partitioning would be faster
         """
 
@@ -264,46 +269,35 @@ class Scene:
         return min_dist < INF, ti.Vector([x_, y_, z_], ti.i32)
 
     @ti.func
-    def d_contrib(self, pos, x, y, z):
+    def d_contrib(self, pos, close):
+        x, y, z = close
         dist = (pos - self.grid[x, y, z].pose).norm()
-
-        return self.grid[x, y, z].opacity * dist
-
-    @ti.func
-    def c_contrib(self, norm, c, x, y, z):
-        return ti.exp(-norm) * (1.0 - ti.exp(-c)) * self.grid[x, y, z].color
+        return self.grid[x, y, z].opacity * dist, dist
 
     @ti.func
-    def interpolate(self, close, pos, acc, carry):
-        distance_contrib = self.d_contrib(pos, close[0], close[1], close[2])
-        color_contrib = self.c_contrib(
-            carry, distance_contrib, close[0], close[1], close[2]
+    def c_contrib(self, norm, dist_contribution, close):
+        x, y, z = close
+        return (
+            ti.exp(-norm)
+            * (1.0 - ti.exp(-dist_contribution))
+            * self.grid[x, y, z].color
         )
 
-        acc += color_contrib * self.grid[close[0], close[1], close[2]].color
-        carry += distance_contrib
+    @ti.func
+    def interpolate(self, close, pos, color_acc, norm_acc):
+        distance_contrib, dist = self.d_contrib(pos, close)
+        color_contrib = self.c_contrib(norm_acc, distance_contrib, close)
 
-        return acc, carry, distance_contrib, color_contrib
+        color_acc += color_contrib * self.grid[close[0], close[1], close[2]].color
+        norm_acc += distance_contrib
 
-    def reset_grads(self):
-        self.per_pix_grad.color.fill(0.0)
-        self.per_pix_grad.opacity.fill(0.0)
-        self.per_pix_grad.pose.fill(-1)
-
-        self.loss[None] = 0.0
-
-    @ti.kernel
-    def tonemap(self):
-        """
-        Could be worth applying a better gamma curve
-        """
-        for i, j in self.view_buffer:
-            self.view_buffer[i, j] = ti.sqrt(self.view_buffer[i, j])
+        return color_acc, norm_acc, dist, color_contrib
 
     @ti.kernel
     def render(self):
         """
-        Given a camera pose, generate the corresponding view
+        Given a camera pose and the scene knowledge baked in the grid,
+        generate the corresponding view
         """
 
         cell_size = (self.grid[1, 0, 0].pose - self.grid[0, 0, 0].pose).norm()
@@ -322,9 +316,9 @@ class Scene:
             # First, intersection
             close, diff = self.intersect(pos, ray)
             pos = self.grid[close[0], close[1], close[2]].pose + diff
-            hit = diff.norm() < cell_size
 
-            # After that, marching cubes
+            # After that, something a bit like marching cubes
+            hit = close[0] > 0
             for steps in range(self.max_depth_ray):
                 if not hit:
                     break
@@ -341,18 +335,16 @@ class Scene:
                 colour_acc, norm_acc, dc, cc = self.interpolate(
                     close, pos, colour_acc, norm_acc
                 )
+                # if self.trace_rendering:
+                #     node_grads[i_node].color_grad = cc
+                #     node_grads[i_node].opacity_grad = dc
+                #     node_grads[i_node].pose = close
+                #     i_node += 1
 
-                # Trace the rendering / gradients
-                if self.trace_rendering:
-                    # FIXME: log contributions for all the nodes touched
-                    # in a sparse structure
-
-                    # Log the grad for the first node for now
-                    # TODO: check the formulas, these are probably wrong
-                    self.per_pix_grad[u, v].pose = close
-                    self.per_pix_grad[u, v].opacity = dc
-                    self.per_pix_grad[u, v].color = cc
-
+                # TODO: store the grad stack directly in the corresponding SNodes
+                # clean that up
+                # TODO: the cube edges could be stored in a static pattern
+                # this could be factorized
                 close[0] += dx
                 colour_acc, norm_acc, dc, cc = self.interpolate(
                     close, pos, colour_acc, norm_acc
@@ -399,6 +391,24 @@ class Scene:
 
             self.view_buffer[u, v] = colour_acc
 
+            # Fused BW pass
+            if self.trace_rendering:
+                # Per pixel RGB loss
+                diff = self.reference_buffer[u, v] - self.view_buffer[u, v]
+
+                # # Walk back the stack of contributions
+                # for node in node_grads:
+                #     (x, y, z) = node.pose
+                #     cc = node.color_grad
+                #     dc = node.opacity_grad
+
+                #     # Warning: different threads can contribute to gradients
+                #     # on the same node here, hence atomic adds are really required
+                #     # TODO: compute the proper grads here
+                #     # Formulas here are just placeholders
+                #     ti.atomic_add(self.grid_grad[x, y, z].color, diff * cc)
+                #     ti.atomic_add(self.grid_grad[x, y, z].opacity, diff.norm * dc)
+
     @ti.kernel
     def gradient_descent(self):
         """
@@ -406,32 +416,10 @@ class Scene:
         .. note: worth implementing some momentum ?
         """
 
-        for u, v in self.per_pix_grad:
-            x, y, z = self.per_pix_grad[u, v].pose
-            if x > 0:
-                ti.atomic_sub(self.grid[x, y, z].color, self.per_pix_grad[u, v].color)
-                ti.atomic_sub(
-                    self.grid[x, y, z].opacity, self.per_pix_grad[u, v].opacity
-                )
-
-    @ti.kernel
-    def reduce(self):
-        """
-        Given a reference view, create a loss by comparing it to the current view_buffer
-
-        .. note: this is most probably not optimal in terms of speed, this could be
-            rewritten as a matmultiplications
-        """
-
-        for u, v in self.view_buffer:
-            diff = self.view_buffer[u, v] - self.reference_buffer[u, v]
-            self.loss[None] += diff.norm_sqr()
-
-            self.per_pix_grad[u, v].color[0] *= diff[0] * self.LR
-            self.per_pix_grad[u, v].color[1] *= diff[1] * self.LR
-            self.per_pix_grad[u, v].color[2] *= diff[2] * self.LR
-
-            self.per_pix_grad[u, v].opacity *= diff.norm() * self.LR
+        for x, y, z in self.grid_grad:
+            if self.grid[x, y, z] > 0:
+                self.grid[x, y, z].color -= self.LR * self.grid_grad[x, y, z].color
+                self.grid[x, y, z].opacity -= self.LR * self.grid_grad[x, y, z].opacity
 
     def optimize(self, use_gui: False):  # type: ignore
         """
@@ -451,13 +439,12 @@ class Scene:
 
         while not gui or gui.running:
             self.reset_grads()
-            self.render()
 
-            # loss is this vs. the reference at that point
-            self.reduce()
+            # Forward and backward passes are fused
+            self.render()
+            print("Loss: ", self.loss[None])
 
             # update the field
-            print("Loss: ", self.loss[None])
             self.gradient_descent()
 
             # dummy, show the current grid
@@ -467,9 +454,5 @@ class Scene:
 
             print("Frame processed")
 
-            # TODO: sparsify ?
-            # TODO: Adjust LR ?
-
         # Make sure that future render calls are not traced by default
         self.trace_rendering = False
-

@@ -14,8 +14,8 @@ TODOs:
   Taichi's autodiff dies on the color interpolation scheme, and on the interestection, which is sparse by nature. May be a better idea to compute the gradients by hand, and store them in a dedicated buffer as the rendering is being done. One possible issue is that the same node can contribute to multiple pixels. Their gradient would differ, and would then need to be traced back to the right node contribution. A naive take is to consider [pixels]x[nodes] gradients, but this would be very sparse and waste tons of memory. Maybe that per-node gradient storage (per pixel) is the better take, at most 4 pixels would be stored there. 
 
 - [ ] Add some unit tests
-- [ ] Handle spherical harmonics in the nodes
-- [ ] General speedup
+- [ ] Handle spherical harmonics in the nodes (or just move to spheres altogether)
+- [ ] General speedup (sparsity for instance)
 
 <p align="center">
   <img src="orbit.gif" width=480>

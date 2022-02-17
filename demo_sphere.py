@@ -3,7 +3,11 @@ import taichi as ti
 
 
 @ti.kernel
-def write_circle(buffer: ti.template(), circle_radius: float):
+def write_circle(buffer: ti.template(), circle_radius: float):  # type: ignore
+    """
+    For optimization testing purposes, 
+    write a white circle in the frame buffer
+    """
     center = ti.Vector([buffer.shape[0] / 2.0, buffer.shape[1] / 2.0])
     sq_radius = circle_radius ** 2
 
@@ -30,6 +34,10 @@ def get_pose() -> ti.Struct:
 
 @ti.kernel
 def write_sphere(grid: ti.template(), grid_size: int):  # type: ignore
+    """
+    For rendering testing purposes, write a sphere in the grid with random color 
+    and random opacity
+    """
     span = ti.Vector([grid_size, grid_size, grid_size]) / 4
     sq_radius = span.norm_sqr()
 
@@ -40,7 +48,9 @@ def write_sphere(grid: ti.template(), grid_size: int):  # type: ignore
                 [ti.random(), ti.random(), ti.random()]
             ).normalized()
 
-            grid[x, y, z].opacity = ti.random()
+            grid[x, y, z].opacity = 0.5  #  ti.random()
+        else:
+            grid[x, y, z].opacity = 0.0
 
 
 def get_scene():
