@@ -103,5 +103,4 @@ if __name__ == "__main__":
     if 1:
         demo_sphere_render()
     else:
-        # WIP - autodiff dies, trying to work around that
         demo_sphere_optimize()

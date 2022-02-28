@@ -69,34 +69,28 @@ class Scene:
 
         # Optimization settings
         self.LR = LR
-        self.loss = ti.field(dtype=ti.f32, shape=(), needs_grad=True)
-
-        # Manual gradient tracing
-        self.trace_rendering = False
-
-        # Store the grid gradients.
-        # This will be fused with the rendering computation if `trace_rendering` is set
-        # Note that several kernels can concurrently increment the grid gradient,
-        # so write accesses need to be atomic
-        self.grid_grad = ti.Struct.field(
-            {"color": ti.types.vector(3, ti.f32), "opacity": ti.f32, "valid": ti.i8},
-            shape=grid_size,
-        )
+        self.loss = ti.field(dtype=ti.f32, shape=())
 
         # Allocate the stack which will host the backward tracing
         # Keep this sparse on purpose, at any point in time most of these
         # will be empty
-        self.grad_stack = ti.root.pointer(ti.ij, resolution)
-        grad_node = ti.Struct.field(
+        self.trace_rendering = False
+
+        # # View_grad will be a sparse field, activated on demand
+        # self.view_grad_root = ti.root.pointer(ti.ij, resolution)
+
+        # # Tie view_grad and its root. There will be
+        # node_grads = self.view_grad_root.dense(ti.ij, (self.max_depth_ray, 8))
+        # node_grads.place(self.view_grad)
+
+        self.view_grad = ti.Struct.field(
             {
-                "color_grad": ti.f32,
+                "color_grad": ti.types.vector(3, ti.f32),
                 "opacity_grad": ti.f32,
                 "pose": ti.types.vector(3, ti.i32),
-            }
+            },
+            shape=(resolution[0], resolution[1], self.max_depth_ray, 8),
         )
-        max_node_callstack = 8 * self.max_depth_ray
-        self.node_grads = self.grad_stack.dense(ti.i, (max_node_callstack))
-        self.node_grads.place(grad_node)
 
         self.reset_grads()
         self.init()
@@ -143,9 +137,8 @@ class Scene:
         )
 
     def reset_grads(self):
-        self.grid_grad.color.fill(0.0)
-        self.grid_grad.opacity.fill(0.0)
-        self.grid_grad.valid.fill(0)
+        self.view_grad.color_grad.fill(0.0)
+        self.view_grad.opacity_grad.fill(0.0)
         self.loss[None] = 0.0
 
     @ti.kernel
@@ -293,6 +286,13 @@ class Scene:
 
         return color_acc, norm_acc, dist, color_contrib
 
+    @ti.func
+    def store_grad(self, u, v, steps, i_node, cc, dc, close):
+        if self.trace_rendering:
+            self.view_grad[u, v, steps, i_node].color_grad = cc
+            self.view_grad[u, v, steps, i_node].opacity_grad = dc
+            self.view_grad[u, v, steps, i_node].pose = close
+
     @ti.kernel
     def render(self):
         """
@@ -335,50 +335,51 @@ class Scene:
                 colour_acc, norm_acc, dc, cc = self.interpolate(
                     close, pos, colour_acc, norm_acc
                 )
-                # if self.trace_rendering:
-                #     node_grads[i_node].color_grad = cc
-                #     node_grads[i_node].opacity_grad = dc
-                #     node_grads[i_node].pose = close
-                #     i_node += 1
+                self.store_grad(u, v, steps, 0, cc, dc, close)
 
-                # TODO: store the grad stack directly in the corresponding SNodes
-                # clean that up
                 # TODO: the cube edges could be stored in a static pattern
                 # this could be factorized
                 close[0] += dx
                 colour_acc, norm_acc, dc, cc = self.interpolate(
                     close, pos, colour_acc, norm_acc
                 )
+                self.store_grad(u, v, steps, 1, cc, dc, close)
 
                 close[1] += dy
                 colour_acc, norm_acc, dc, cc = self.interpolate(
                     close, pos, colour_acc, norm_acc
                 )
+                self.store_grad(u, v, steps, 2, cc, dc, close)
 
                 close[0] -= dx
                 colour_acc, norm_acc, dc, cc = self.interpolate(
                     close, pos, colour_acc, norm_acc
                 )
+                self.store_grad(u, v, steps, 3, cc, dc, close)
 
                 close[2] += dz
                 colour_acc, norm_acc, dc, cc = self.interpolate(
                     close, pos, colour_acc, norm_acc
                 )
+                self.store_grad(u, v, steps, 4, cc, dc, close)
 
                 close[0] += dx
                 colour_acc, norm_acc, dc, cc = self.interpolate(
                     close, pos, colour_acc, norm_acc
                 )
+                self.store_grad(u, v, steps, 5, cc, dc, close)
 
                 close[1] -= dy
                 colour_acc, norm_acc, dc, cc = self.interpolate(
                     close, pos, colour_acc, norm_acc
                 )
+                self.store_grad(u, v, steps, 6, cc, dc, close)
 
                 close[0] -= dx
                 colour_acc, norm_acc, dc, cc = self.interpolate(
                     close, pos, colour_acc, norm_acc
                 )
+                self.store_grad(u, v, steps, 7, cc, dc, close)
 
                 # Move to the next cell
                 pos = pos + ray_step  # Update the reference position
@@ -416,10 +417,14 @@ class Scene:
         .. note: worth implementing some momentum ?
         """
 
-        for x, y, z in self.grid_grad:
-            if self.grid[x, y, z] > 0:
-                self.grid[x, y, z].color -= self.LR * self.grid_grad[x, y, z].color
-                self.grid[x, y, z].opacity -= self.LR * self.grid_grad[x, y, z].opacity
+        pass
+
+        # for x, y, z in self.grid_grad:
+        #     pass
+
+        # if self.grid[x, y, z] > 0:
+        #     self.grid[x, y, z].color -= self.LR * self.grid_grad[x, y, z].color
+        #     self.grid[x, y, z].opacity -= self.LR * self.grid_grad[x, y, z].opacity
 
     def optimize(self, use_gui: False):  # type: ignore
         """
@@ -431,9 +436,6 @@ class Scene:
             gui.fps_limit = 60
         else:
             gui = None
-
-        # Put something in the grid, whatever
-        # self.grid.fill(0.0)
 
         self.trace_rendering = True
 
