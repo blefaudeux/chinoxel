@@ -5,11 +5,11 @@ import taichi as ti
 @ti.kernel
 def write_circle(buffer: ti.template(), circle_radius: float):  # type: ignore
     """
-    For optimization testing purposes, 
+    For optimization testing purposes,
     write a white circle in the frame buffer
     """
     center = ti.Vector([buffer.shape[0] / 2.0, buffer.shape[1] / 2.0])
-    sq_radius = circle_radius ** 2
+    sq_radius = circle_radius**2
 
     for u, v in buffer:
         pos = ti.Vector([u, v], dt=ti.float32) - center
@@ -24,7 +24,13 @@ def write_circle(buffer: ti.template(), circle_radius: float):  # type: ignore
 def get_pose() -> ti.Struct:
     pose = ti.Struct(
         {
-            "rotation": ti.Matrix([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0],]),
+            "rotation": ti.Matrix(
+                [
+                    [1.0, 0.0, 0.0],
+                    [0.0, 1.0, 0.0],
+                    [0.0, 0.0, 1.0],
+                ]
+            ),
             "translation": ti.Vector([0.0, 0.0, 3.0]),
         }
     )
@@ -35,7 +41,7 @@ def get_pose() -> ti.Struct:
 @ti.kernel
 def write_sphere(grid: ti.template(), grid_size: int):  # type: ignore
     """
-    For rendering testing purposes, write a sphere in the grid with random color 
+    For rendering testing purposes, write a sphere in the grid with random color
     and random opacity
     """
     span = ti.Vector([grid_size, grid_size, grid_size]) / 2
@@ -88,19 +94,27 @@ def demo_sphere_render():
 
 
 def demo_sphere_optimize():
-    scene, _ = get_scene()
+    scene, resolution = get_scene()
+
+    # Check the rendering
+    gui = ti.GUI("Chinoxel", resolution[0], fast_gui=False)
+    gui.fps_limit = 60
 
     # Generate the synthetic view
     write_circle(scene.reference_buffer, 100.0)
 
     # Optimize the scene given the view
-    scene.optimize(use_gui=True)
+    while gui.running:
+        scene.optimize()
+        gui.set_image(scene.view_buffer)
+        gui.show()
+        scene.orbital_inc_rotate()
 
 
 if __name__ == "__main__":
     ti.init(arch=ti.gpu)
 
-    if 0:
+    if 1:
         demo_sphere_render()
     else:
         demo_sphere_optimize()

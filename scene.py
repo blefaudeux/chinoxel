@@ -111,7 +111,11 @@ class Scene:
 
         # Init the camera pose matrix
         self.camera_pose.rotation[None] = ti.Matrix(
-            [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0],]
+            [
+                [1.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0],
+                [0.0, 0.0, 1.0],
+            ]
         )
 
         self.camera_pose.translation[None] = ti.Vector([0.0, 0.0, 3.0])
@@ -383,7 +387,13 @@ class Scene:
             ray_step = ray / ray_abs_max * cell_size  # unitary on one direction
 
             # Ray marching variables, handles the accumulation
-            colour_acc = ti.Vector([0.0, 0.0, 0.0,])
+            colour_acc = ti.Vector(
+                [
+                    0.0,
+                    0.0,
+                    0.0,
+                ]
+            )
             norm_acc = 0.0
 
             # First, find the initial intersection node
@@ -423,50 +433,37 @@ class Scene:
                         # Find the node
                         grad_log = self.view_grad[u, v, i_step, i_node]
                         (x, y, z) = grad_log.pose
-                        cc = grad_log.color_grad
-                        dc = grad_log.opacity_grad
 
                         # Warning: different threads can contribute to gradients
                         # on the same node here, hence atomic adds are really required
                         # TODO: compute the proper grads here
                         # Formulas here are just placeholders
+
+                        # cc = grad_log.color_grad
+                        # dc = grad_log.opacity_grad
                         # ti.atomic_add(self.grid[x, y, z].color, diff.norm() * cc)
                         # ti.atomic_add(self.grid[x, y, z].opacity, diff.norm() * dc)
 
                         ti.atomic_add(
-                            self.grid[x, y, z].color, ti.Vector([0.1, 0.1, 0.1])
+                            self.grid[x, y, z].color,
+                            0.1 * ti.Vector([ti.random(), ti.random(), ti.random()]),
                         )
                         ti.atomic_add(self.grid[x, y, z].opacity, 0.1)
 
-    def optimize(self, use_gui: False):  # type: ignore
+    def optimize(self):
         """
         Adapt the current scene to the current reference_buffer
         """
 
-        if use_gui:
-            gui = ti.GUI("Chinoxel", self.res, fast_gui=False)
-            gui.fps_limit = 60
-        else:
-            gui = None
-
         self.trace_rendering = True
+        self.reset_grads()
 
-        while not gui or gui.running:
-            self.reset_grads()
+        # Forward and backward passes are fused
+        self.render()
 
-            # Forward and backward passes are fused
-            self.render()
-
-            # Compute the resulting error
-            mismatch = self.compute_mistmatch()
-            print("Current mistmatch: ", mismatch)
-
-            # dummy, show the current grid
-            if use_gui:
-                gui.set_image(self.view_buffer)
-                gui.show()
-
-            print("Frame processed")
+        # Compute the resulting error
+        mismatch = self.compute_mistmatch()
+        print("Current mistmatch: ", mismatch)
 
         # Make sure that future render calls are not traced by default
         self.trace_rendering = False
