@@ -38,8 +38,8 @@ def write_sphere(grid: ti.template(), grid_size: int):  # type: ignore
     For rendering testing purposes, write a sphere in the grid with random color 
     and random opacity
     """
-    span = ti.Vector([grid_size, grid_size, grid_size]) / 4
-    sq_radius = span.norm_sqr()
+    span = ti.Vector([grid_size, grid_size, grid_size]) / 2
+    sq_radius = (grid_size / 4) ** 2
 
     for x, y, z in grid:
         dist = ti.Vector([x, y, z]) - span
