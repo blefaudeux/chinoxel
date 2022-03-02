@@ -100,7 +100,7 @@ def demo_sphere_optimize():
 if __name__ == "__main__":
     ti.init(arch=ti.gpu)
 
-    if 1:
+    if 0:
         demo_sphere_render()
     else:
         demo_sphere_optimize()

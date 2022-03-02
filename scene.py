@@ -69,7 +69,6 @@ class Scene:
 
         # Optimization settings
         self.LR = LR
-        self.loss = ti.field(dtype=ti.f32, shape=())
 
         # Allocate the stack which will host the backward tracing
         # Keep this sparse on purpose, at any point in time most of these
@@ -139,7 +138,6 @@ class Scene:
     def reset_grads(self):
         self.view_grad.color_grad.fill(0.0)
         self.view_grad.opacity_grad.fill(0.0)
-        self.loss[None] = 0.0
 
     @ti.kernel
     def tonemap(self):
@@ -357,6 +355,18 @@ class Scene:
         return colour_acc, norm_acc
 
     @ti.kernel
+    def compute_mistmatch(self) -> ti.f32:
+        """
+        Compute an arbitrary difference metric in between the reference and current view buffers
+        """
+        mismatch = 0.0
+
+        for u, v in self.view_buffer:
+            mismatch += (self.view_buffer[u, v] - self.reference_buffer[u, v]).norm()
+
+        return mismatch
+
+    @ti.kernel
     def render(self):
         """
         Given a camera pose and the scene knowledge baked in the grid,
@@ -407,34 +417,26 @@ class Scene:
                 # Per pixel RGB loss
                 diff = self.reference_buffer[u, v] - self.view_buffer[u, v]
 
-                # # Walk back the stack of contributions
-                # for node in node_grads:
-                #     (x, y, z) = node.pose
-                #     cc = node.color_grad
-                #     dc = node.opacity_grad
+                # Walk back the stack of contributions
+                for i_step in range(self.max_depth_ray):
+                    for i_node in range(8):
+                        # Find the node
+                        grad_log = self.view_grad[u, v, i_step, i_node]
+                        (x, y, z) = grad_log.pose
+                        cc = grad_log.color_grad
+                        dc = grad_log.opacity_grad
 
-                #     # Warning: different threads can contribute to gradients
-                #     # on the same node here, hence atomic adds are really required
-                #     # TODO: compute the proper grads here
-                #     # Formulas here are just placeholders
-                #     ti.atomic_add(self.grid_grad[x, y, z].color, diff * cc)
-                #     ti.atomic_add(self.grid_grad[x, y, z].opacity, diff.norm * dc)
+                        # Warning: different threads can contribute to gradients
+                        # on the same node here, hence atomic adds are really required
+                        # TODO: compute the proper grads here
+                        # Formulas here are just placeholders
+                        # ti.atomic_add(self.grid[x, y, z].color, diff.norm() * cc)
+                        # ti.atomic_add(self.grid[x, y, z].opacity, diff.norm() * dc)
 
-    @ti.kernel
-    def gradient_descent(self):
-        """
-        Given the computed gradient, adjust all the elements of the grid
-        .. note: worth implementing some momentum ?
-        """
-
-        pass
-
-        # for x, y, z in self.grid_grad:
-        #     pass
-
-        # if self.grid[x, y, z] > 0:
-        #     self.grid[x, y, z].color -= self.LR * self.grid_grad[x, y, z].color
-        #     self.grid[x, y, z].opacity -= self.LR * self.grid_grad[x, y, z].opacity
+                        ti.atomic_add(
+                            self.grid[x, y, z].color, ti.Vector([0.1, 0.1, 0.1])
+                        )
+                        ti.atomic_add(self.grid[x, y, z].opacity, 0.1)
 
     def optimize(self, use_gui: False):  # type: ignore
         """
@@ -454,10 +456,10 @@ class Scene:
 
             # Forward and backward passes are fused
             self.render()
-            print("Loss: ", self.loss[None])
 
-            # update the field
-            self.gradient_descent()
+            # Compute the resulting error
+            mismatch = self.compute_mistmatch()
+            print("Current mistmatch: ", mismatch)
 
             # dummy, show the current grid
             if use_gui:
