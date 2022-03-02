@@ -293,6 +293,69 @@ class Scene:
             self.view_grad[u, v, steps, i_node].opacity_grad = dc
             self.view_grad[u, v, steps, i_node].pose = close
 
+    @ti.func
+    def process_cube(self, u, v, pose, closest, colour_acc, norm_acc, steps):
+        # Fetch the colour in between the 8 closest nodes
+        # we have the indices of the closest node, and the point where the
+        # ray is right now
+
+        diff = pose - self.grid[closest[0], closest[1], closest[2]].pose
+
+        dx = 1 if diff[0] > 0 else -1
+        dy = 1 if diff[1] > 0 else -1
+        dz = 1 if diff[2] > 0 else -1
+
+        colour_acc, norm_acc, dc, cc = self.interpolate(
+            closest, pose, colour_acc, norm_acc
+        )
+        self.store_grad(u, v, steps, 0, cc, dc, closest)
+
+        # TODO: the cube edges could be stored in a static pattern
+        # this could be factorized
+        closest[0] += dx
+        colour_acc, norm_acc, dc, cc = self.interpolate(
+            closest, pose, colour_acc, norm_acc
+        )
+        self.store_grad(u, v, steps, 0, cc, dc, closest)
+
+        closest[1] += dy
+        colour_acc, norm_acc, dc, cc = self.interpolate(
+            closest, pose, colour_acc, norm_acc
+        )
+        self.store_grad(u, v, steps, 0, cc, dc, closest)
+
+        closest[0] -= dx
+        colour_acc, norm_acc, dc, cc = self.interpolate(
+            closest, pose, colour_acc, norm_acc
+        )
+        self.store_grad(u, v, steps, 0, cc, dc, closest)
+
+        closest[2] += dz
+        colour_acc, norm_acc, dc, cc = self.interpolate(
+            closest, pose, colour_acc, norm_acc
+        )
+        self.store_grad(u, v, steps, 0, cc, dc, closest)
+
+        closest[0] += dx
+        colour_acc, norm_acc, dc, cc = self.interpolate(
+            closest, pose, colour_acc, norm_acc
+        )
+        self.store_grad(u, v, steps, 0, cc, dc, closest)
+
+        closest[1] -= dy
+        colour_acc, norm_acc, dc, cc = self.interpolate(
+            closest, pose, colour_acc, norm_acc
+        )
+        self.store_grad(u, v, steps, 0, cc, dc, closest)
+
+        closest[0] -= dx
+        colour_acc, norm_acc, dc, cc = self.interpolate(
+            closest, pose, colour_acc, norm_acc
+        )
+        self.store_grad(u, v, steps, 0, cc, dc, closest)
+
+        return colour_acc, norm_acc
+
     @ti.kernel
     def render(self):
         """
@@ -304,89 +367,36 @@ class Scene:
 
         for u, v in self.view_buffer:
             # Compute the initial ray direction
-            pos = self.camera_pose.translation[None]
+            start_point = self.camera_pose.translation[None]
             ray = self.get_ray(u, v)
             ray_abs_max = ti.max(ray.max(), -ray.min())
             ray_step = ray / ray_abs_max * cell_size  # unitary on one direction
 
-            # # Ray marching variables
+            # Ray marching variables, handles the accumulation
             colour_acc = ti.Vector([0.0, 0.0, 0.0,])
             norm_acc = 0.0
 
-            # First, intersection
-            close, diff = self.intersect(pos, ray)
-            pos = self.grid[close[0], close[1], close[2]].pose + diff
+            # First, find the initial intersection node
+            closest, diff = self.intersect(start_point, ray)
+            pose = self.grid[closest[0], closest[1], closest[2]].pose + diff
 
             # After that, something a bit like marching cubes
-            hit = close[0] > 0
+            hit = closest[0] > 0
             for steps in range(self.max_depth_ray):
                 if not hit:
                     break
 
-                # Fetch the colour in between the 8 closest nodes
-                # we have the indices of the closest node, and the point where the
-                # ray is right now
-                diff = pos - self.grid[close[0], close[1], close[2]].pose
-
-                dx = 1 if diff[0] > 0 else -1
-                dy = 1 if diff[1] > 0 else -1
-                dz = 1 if diff[2] > 0 else -1
-
-                colour_acc, norm_acc, dc, cc = self.interpolate(
-                    close, pos, colour_acc, norm_acc
+                # Compute the contribution of this cube
+                colour_acc, norm_acc = self.process_cube(
+                    u, v, pose, closest, colour_acc, norm_acc, steps
                 )
-                self.store_grad(u, v, steps, 0, cc, dc, close)
-
-                # TODO: the cube edges could be stored in a static pattern
-                # this could be factorized
-                close[0] += dx
-                colour_acc, norm_acc, dc, cc = self.interpolate(
-                    close, pos, colour_acc, norm_acc
-                )
-                self.store_grad(u, v, steps, 1, cc, dc, close)
-
-                close[1] += dy
-                colour_acc, norm_acc, dc, cc = self.interpolate(
-                    close, pos, colour_acc, norm_acc
-                )
-                self.store_grad(u, v, steps, 2, cc, dc, close)
-
-                close[0] -= dx
-                colour_acc, norm_acc, dc, cc = self.interpolate(
-                    close, pos, colour_acc, norm_acc
-                )
-                self.store_grad(u, v, steps, 3, cc, dc, close)
-
-                close[2] += dz
-                colour_acc, norm_acc, dc, cc = self.interpolate(
-                    close, pos, colour_acc, norm_acc
-                )
-                self.store_grad(u, v, steps, 4, cc, dc, close)
-
-                close[0] += dx
-                colour_acc, norm_acc, dc, cc = self.interpolate(
-                    close, pos, colour_acc, norm_acc
-                )
-                self.store_grad(u, v, steps, 5, cc, dc, close)
-
-                close[1] -= dy
-                colour_acc, norm_acc, dc, cc = self.interpolate(
-                    close, pos, colour_acc, norm_acc
-                )
-                self.store_grad(u, v, steps, 6, cc, dc, close)
-
-                close[0] -= dx
-                colour_acc, norm_acc, dc, cc = self.interpolate(
-                    close, pos, colour_acc, norm_acc
-                )
-                self.store_grad(u, v, steps, 7, cc, dc, close)
 
                 # Move to the next cell
-                pos = pos + ray_step  # Update the reference position
+                pose = pose + ray_step  # Update the reference position
 
                 # Update the closest point
-                pos += cell_size * ray
-                hit, close = self.closest_node(pos, close)
+                pose += cell_size * ray
+                hit, closest = self.closest_node(pose, closest)
 
                 steps += 1
 
