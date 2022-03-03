@@ -75,17 +75,11 @@ class Scene:
         # will be empty
         self.trace_rendering = False
 
-        # # View_grad will be a sparse field, activated on demand
-        # self.view_grad_root = ti.root.pointer(ti.ij, resolution)
-
-        # # Tie view_grad and its root. There will be
-        # node_grads = self.view_grad_root.dense(ti.ij, (self.max_depth_ray, 8))
-        # node_grads.place(self.view_grad)
-
+        # TODO: move to sparse field
         self.view_grad = ti.Struct.field(
             {
-                "color_grad": ti.types.vector(3, ti.f32),
-                "opacity_grad": ti.f32,
+                "color_grad": ti.f32,
+                "opacity_grad": ti.types.vector(3, ti.f32),
                 "pose": ti.types.vector(3, ti.i32),
             },
             shape=(resolution[0], resolution[1], self.max_depth_ray, 8),
@@ -264,35 +258,46 @@ class Scene:
         return min_dist < INF, ti.Vector([x_, y_, z_], ti.i32)
 
     @ti.func
-    def d_contrib(self, pos, close):
+    def interpolate(self, close, pos, color_acc, norm_acc):
+        """
+        Update the accumulated color for this node
+        Keep track of the running norm, and return the gradient with respect to opacity
+        and the gradient with respect to color
+        """
+
+        # TODO: remove duplicates
+
         x, y, z = close
         dist = (pos - self.grid[x, y, z].pose).norm()
-        return self.grid[x, y, z].opacity * dist, dist
 
-    @ti.func
-    def c_contrib(self, norm, dist_contribution, close):
-        x, y, z = close
-        return (
-            ti.exp(-norm)
-            * (1.0 - ti.exp(-dist_contribution))
+        distance_contrib = dist * self.grid[x, y, z].opacity
+        color_contrib = (
+            ti.exp(-norm_acc)
+            * (1.0 - ti.exp(-distance_contrib))
             * self.grid[x, y, z].color
         )
-
-    @ti.func
-    def interpolate(self, close, pos, color_acc, norm_acc):
-        distance_contrib, dist = self.d_contrib(pos, close)
-        color_contrib = self.c_contrib(norm_acc, distance_contrib, close)
 
         color_acc += color_contrib * self.grid[close[0], close[1], close[2]].color
         norm_acc += distance_contrib
 
-        return color_acc, norm_acc, dist, color_contrib
+        # Opacity gradient
+        grad_opacity = (
+            ti.exp(-norm_acc)
+            * self.grid[x, y, z].color
+            * dist
+            * ti.exp(-distance_contrib)
+        )
+
+        # Color gradient
+        grad_color = ti.exp(-norm_acc) * (1.0 - ti.exp(-distance_contrib))
+
+        return color_acc, norm_acc, grad_opacity, grad_color
 
     @ti.func
-    def store_grad(self, u, v, steps, i_node, cc, dc, close):
+    def store_grad(self, u, v, steps, i_node, color_grad, opacity_grad, close):
         if self.trace_rendering:
-            self.view_grad[u, v, steps, i_node].color_grad = cc
-            self.view_grad[u, v, steps, i_node].opacity_grad = dc
+            self.view_grad[u, v, steps, i_node].color_grad = color_grad
+            self.view_grad[u, v, steps, i_node].opacity_grad = opacity_grad
             self.view_grad[u, v, steps, i_node].pose = close
 
     @ti.func
@@ -307,54 +312,54 @@ class Scene:
         dy = 1 if diff[1] > 0 else -1
         dz = 1 if diff[2] > 0 else -1
 
-        colour_acc, norm_acc, dc, cc = self.interpolate(
+        colour_acc, norm_acc, go, gc = self.interpolate(
             closest, pose, colour_acc, norm_acc
         )
-        self.store_grad(u, v, steps, 0, cc, dc, closest)
+        self.store_grad(u, v, steps, 0, gc, go, closest)
 
         # TODO: the cube edges could be stored in a static pattern
         # this could be factorized
         closest[0] += dx
-        colour_acc, norm_acc, dc, cc = self.interpolate(
+        colour_acc, norm_acc, go, gc = self.interpolate(
             closest, pose, colour_acc, norm_acc
         )
-        self.store_grad(u, v, steps, 0, cc, dc, closest)
+        self.store_grad(u, v, steps, 1, gc, go, closest)
 
         closest[1] += dy
-        colour_acc, norm_acc, dc, cc = self.interpolate(
+        colour_acc, norm_acc, go, gc = self.interpolate(
             closest, pose, colour_acc, norm_acc
         )
-        self.store_grad(u, v, steps, 0, cc, dc, closest)
+        self.store_grad(u, v, steps, 2, gc, go, closest)
 
         closest[0] -= dx
-        colour_acc, norm_acc, dc, cc = self.interpolate(
+        colour_acc, norm_acc, go, gc = self.interpolate(
             closest, pose, colour_acc, norm_acc
         )
-        self.store_grad(u, v, steps, 0, cc, dc, closest)
+        self.store_grad(u, v, steps, 3, gc, go, closest)
 
         closest[2] += dz
-        colour_acc, norm_acc, dc, cc = self.interpolate(
+        colour_acc, norm_acc, go, gc = self.interpolate(
             closest, pose, colour_acc, norm_acc
         )
-        self.store_grad(u, v, steps, 0, cc, dc, closest)
+        self.store_grad(u, v, steps, 4, gc, go, closest)
 
         closest[0] += dx
-        colour_acc, norm_acc, dc, cc = self.interpolate(
+        colour_acc, norm_acc, go, gc = self.interpolate(
             closest, pose, colour_acc, norm_acc
         )
-        self.store_grad(u, v, steps, 0, cc, dc, closest)
+        self.store_grad(u, v, steps, 5, gc, go, closest)
 
         closest[1] -= dy
-        colour_acc, norm_acc, dc, cc = self.interpolate(
+        colour_acc, norm_acc, go, gc = self.interpolate(
             closest, pose, colour_acc, norm_acc
         )
-        self.store_grad(u, v, steps, 0, cc, dc, closest)
+        self.store_grad(u, v, steps, 6, gc, go, closest)
 
         closest[0] -= dx
-        colour_acc, norm_acc, dc, cc = self.interpolate(
+        colour_acc, norm_acc, go, gc = self.interpolate(
             closest, pose, colour_acc, norm_acc
         )
-        self.store_grad(u, v, steps, 0, cc, dc, closest)
+        self.store_grad(u, v, steps, 7, gc, go, closest)
 
         return colour_acc, norm_acc
 
@@ -434,21 +439,20 @@ class Scene:
                         grad_log = self.view_grad[u, v, i_step, i_node]
                         (x, y, z) = grad_log.pose
 
-                        # Warning: different threads can contribute to gradients
-                        # on the same node here, hence atomic adds are really required
-                        # TODO: compute the proper grads here
-                        # Formulas here are just placeholders
+                        if grad_log.color_grad != 0.0:
+                            # color_step = self.LR * grad_log.color_grad * diff
+                            # opacity_step = self.LR * grad_log.opacity_grad.dot(diff)
+                            opacity_step = 0.1  # grad_log.color_grad
+                            color_step = ti.Vector(
+                                [0.1, 0.1, 0.1]
+                            )  # grad_log.opacity_grad
 
-                        # cc = grad_log.color_grad
-                        # dc = grad_log.opacity_grad
-                        # ti.atomic_add(self.grid[x, y, z].color, diff.norm() * cc)
-                        # ti.atomic_add(self.grid[x, y, z].opacity, diff.norm() * dc)
-
-                        ti.atomic_add(
-                            self.grid[x, y, z].color,
-                            0.1 * ti.Vector([ti.random(), ti.random(), ti.random()]),
-                        )
-                        ti.atomic_add(self.grid[x, y, z].opacity, 0.1)
+                            # Warning: different threads can contribute to gradients
+                            # on the same node here, hence atomic adds are really required
+                            # TODO: compute the proper grads here
+                            # Formulas here are just placeholders
+                            ti.atomic_add(self.grid[x, y, z].color, color_step)
+                            ti.atomic_add(self.grid[x, y, z].opacity, opacity_step)
 
     def optimize(self):
         """

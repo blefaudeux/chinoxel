@@ -62,14 +62,14 @@ def write_sphere(grid: ti.template(), grid_size: int):  # type: ignore
 def get_scene():
     # Build the Chinoxel scene
     # Settings here are completely arbitrary
-    n_nodes = 20
+    n_nodes = 10
     resolution = (800, 800)
     focal = 1.0 / resolution[0]
     scene = Scene(
         grid_size=(n_nodes, n_nodes, n_nodes),
         resolution=resolution,
         focal=focal,
-        max_depth_ray=3,
+        max_depth_ray=1,
         LR=0.1,
     )
 
@@ -88,6 +88,7 @@ def demo_sphere_render():
 
     while gui.running:
         scene.render()
+        scene.tonemap()
         gui.set_image(scene.view_buffer)
         gui.show()
         scene.orbital_inc_rotate()
