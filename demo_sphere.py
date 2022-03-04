@@ -10,7 +10,7 @@ def write_circle(buffer: ti.template(), circle_radius: float):  # type: ignore
     write a white circle in the frame buffer
     """
     center = ti.Vector([buffer.shape[0] / 2.0, buffer.shape[1] / 2.0])
-    sq_radius = circle_radius ** 2
+    sq_radius = circle_radius**2
 
     for u, v in buffer:
         pos = ti.Vector([u, v], dt=ti.float32) - center
@@ -25,7 +25,13 @@ def write_circle(buffer: ti.template(), circle_radius: float):  # type: ignore
 def get_pose() -> ti.Struct:
     pose = ti.Struct(
         {
-            "rotation": ti.Matrix([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0],]),
+            "rotation": ti.Matrix(
+                [
+                    [1.0, 0.0, 0.0],
+                    [0.0, 1.0, 0.0],
+                    [0.0, 0.0, 1.0],
+                ]
+            ),
             "translation": ti.Vector([0.0, 0.0, 3.0]),
         }
     )
@@ -49,7 +55,7 @@ def write_sphere(grid: ti.template(), grid_size: int):  # type: ignore
                 [ti.random(), ti.random(), ti.random()]
             ).normalized()
 
-            grid[x, y, z].opacity = 0.5  #  ti.random()
+            grid[x, y, z].opacity = ti.random()
         else:
             grid[x, y, z].opacity = 0.0
 
@@ -57,14 +63,14 @@ def write_sphere(grid: ti.template(), grid_size: int):  # type: ignore
 def get_scene():
     # Build the Chinoxel scene
     # Settings here are completely arbitrary
-    n_nodes = 10
-    resolution = (800, 800)
+    n_nodes = 20
+    resolution = (640, 640)
     focal = 1.0 / resolution[0]
     scene = Scene(
         grid_size=(n_nodes, n_nodes, n_nodes),
         resolution=resolution,
         focal=focal,
-        max_depth_ray=1,
+        max_depth_ray=2,
         LR=0.1,
     )
 
@@ -100,8 +106,17 @@ def demo_sphere_optimize():
     write_circle(scene.reference_buffer, 100.0)
 
     # Optimize the scene given the view
+    i_step = 0
+    max_steps = 100
+
     while gui.running:
-        scene.optimize()
+        # learn for a while, then render
+        if i_step < max_steps:
+            scene.optimize()
+        else:
+            scene.render()
+
+        i_step += 1
         gui.set_image(scene.view_buffer)
         gui.show()
         scene.orbital_inc_rotate()

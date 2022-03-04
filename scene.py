@@ -105,7 +105,11 @@ class Scene:
 
         # Init the camera pose matrix
         self.camera_pose.rotation[None] = ti.Matrix(
-            [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0],]
+            [
+                [1.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0],
+                [0.0, 0.0, 1.0],
+            ]
         )
 
         self.camera_pose.translation[None] = ti.Vector([0.0, 0.0, 3.0])
@@ -370,6 +374,29 @@ class Scene:
         return mismatch
 
     @ti.kernel
+    def clamp_fields(self):
+        """
+        Make sure that the opacity stays within reasonable bounds
+        """
+
+        for x, y, z in self.grid:
+            self.grid[x, y, z].opacity = ti.max(
+                ti.min(self.grid[x, y, z].opacity, 1.0), 0.0
+            )
+
+            self.grid[x, y, z].color[0] = ti.max(
+                ti.min(self.grid[x, y, z].color[0], 1.0), 0.0
+            )
+
+            self.grid[x, y, z].color[1] = ti.max(
+                ti.min(self.grid[x, y, z].color[1], 1.0), 0.0
+            )
+
+            self.grid[x, y, z].color[2] = ti.max(
+                ti.min(self.grid[x, y, z].color[2], 1.0), 0.0
+            )
+
+    @ti.kernel
     def render(self):
         """
         Given a camera pose and the scene knowledge baked in the grid,
@@ -386,7 +413,13 @@ class Scene:
             ray_step = ray / ray_abs_max * cell_size  # unitary on one direction
 
             # Ray marching variables, handles the accumulation
-            colour_acc = ti.Vector([0.0, 0.0, 0.0,])
+            colour_acc = ti.Vector(
+                [
+                    0.0,
+                    0.0,
+                    0.0,
+                ]
+            )
             norm_acc = 0.0
 
             # First, find the initial intersection node
@@ -428,19 +461,17 @@ class Scene:
                         (x, y, z) = grad_log.pose
 
                         if grad_log.color_grad != 0.0:
+                            # FIXME: Grad computations are mostly broken
                             color_step = self.LR * grad_log.color_grad * diff
-
-                            # FIXME - opacity grad is broken
                             opacity_step = (
-                                self.LR * 0.1 * diff.norm()
-                            )  #  grad_log.opacity_grad.dot(diff)
+                                0.1  # self.LR * grad_log.opacity_grad.dot(diff)
+                            )
 
                             # Warning: different threads can contribute to gradients
                             # on the same node here, hence atomic adds should really be required
-                            self.grid[
-                                x, y, z
-                            ].color += color_step  # some updates will be missed here, trading speed / correctness
-                            self.grid[x, y, z].opacity += opacity_step
+                            # some updates will be missed here, trading speed / correctness
+                            ti.atomic_add(self.grid[x, y, z].color, color_step)
+                            ti.atomic_add(self.grid[x, y, z].opacity, opacity_step)
 
     def optimize(self):
         """
@@ -452,6 +483,7 @@ class Scene:
 
         # Forward and backward passes are fused
         self.render()
+        self.clamp_fields()
 
         # Compute the resulting error
         mismatch = self.compute_mistmatch()
