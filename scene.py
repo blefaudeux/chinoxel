@@ -105,11 +105,7 @@ class Scene:
 
         # Init the camera pose matrix
         self.camera_pose.rotation[None] = ti.Matrix(
-            [
-                [1.0, 0.0, 0.0],
-                [0.0, 1.0, 0.0],
-                [0.0, 0.0, 1.0],
-            ]
+            [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0],]
         )
 
         self.camera_pose.translation[None] = ti.Vector([0.0, 0.0, 3.0])
@@ -271,17 +267,13 @@ class Scene:
         dist = (pos - self.grid[x, y, z].pose).norm()
 
         distance_contrib = dist * self.grid[x, y, z].opacity
-        color_contrib = (
-            ti.exp(-norm_acc)
-            * (1.0 - ti.exp(-distance_contrib))
-            * self.grid[x, y, z].color
-        )
+        color_grad = ti.exp(-norm_acc) * (1.0 - ti.exp(-distance_contrib))
 
-        color_acc += color_contrib * self.grid[close[0], close[1], close[2]].color
+        color_acc += color_grad * self.grid[x, y, z].color
         norm_acc += distance_contrib
 
         # Opacity gradient
-        grad_opacity = (
+        opacity_grad = (
             ti.exp(-norm_acc)
             * self.grid[x, y, z].color
             * dist
@@ -289,15 +281,17 @@ class Scene:
         )
 
         # Color gradient
-        grad_color = ti.exp(-norm_acc) * (1.0 - ti.exp(-distance_contrib))
+        color_grad = ti.exp(-norm_acc) * (1.0 - ti.exp(-distance_contrib))
 
-        return color_acc, norm_acc, grad_opacity, grad_color
+        return color_acc, norm_acc, opacity_grad, color_grad
 
     @ti.func
     def store_grad(self, u, v, steps, i_node, color_grad, opacity_grad, close):
         if self.trace_rendering:
             self.view_grad[u, v, steps, i_node].color_grad = color_grad
-            self.view_grad[u, v, steps, i_node].opacity_grad = opacity_grad
+            self.view_grad[u, v, steps, i_node].opacity_grad = ti.Vector(
+                [0.1, 0.1, 0.1]
+            )  # opacity_grad
             self.view_grad[u, v, steps, i_node].pose = close
 
     @ti.func
@@ -392,13 +386,7 @@ class Scene:
             ray_step = ray / ray_abs_max * cell_size  # unitary on one direction
 
             # Ray marching variables, handles the accumulation
-            colour_acc = ti.Vector(
-                [
-                    0.0,
-                    0.0,
-                    0.0,
-                ]
-            )
+            colour_acc = ti.Vector([0.0, 0.0, 0.0,])
             norm_acc = 0.0
 
             # First, find the initial intersection node
@@ -440,19 +428,19 @@ class Scene:
                         (x, y, z) = grad_log.pose
 
                         if grad_log.color_grad != 0.0:
-                            # color_step = self.LR * grad_log.color_grad * diff
-                            # opacity_step = self.LR * grad_log.opacity_grad.dot(diff)
-                            opacity_step = 0.1  # grad_log.color_grad
-                            color_step = ti.Vector(
-                                [0.1, 0.1, 0.1]
-                            )  # grad_log.opacity_grad
+                            color_step = self.LR * grad_log.color_grad * diff
+
+                            # FIXME - opacity grad is broken
+                            opacity_step = (
+                                self.LR * 0.1 * diff.norm()
+                            )  #  grad_log.opacity_grad.dot(diff)
 
                             # Warning: different threads can contribute to gradients
-                            # on the same node here, hence atomic adds are really required
-                            # TODO: compute the proper grads here
-                            # Formulas here are just placeholders
-                            ti.atomic_add(self.grid[x, y, z].color, color_step)
-                            ti.atomic_add(self.grid[x, y, z].opacity, opacity_step)
+                            # on the same node here, hence atomic adds should really be required
+                            self.grid[
+                                x, y, z
+                            ].color += color_step  # some updates will be missed here, trading speed / correctness
+                            self.grid[x, y, z].opacity += opacity_step
 
     def optimize(self):
         """

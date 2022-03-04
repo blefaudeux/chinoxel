@@ -1,5 +1,6 @@
 from scene import Scene
 import taichi as ti
+import argparse
 
 
 @ti.kernel
@@ -9,7 +10,7 @@ def write_circle(buffer: ti.template(), circle_radius: float):  # type: ignore
     write a white circle in the frame buffer
     """
     center = ti.Vector([buffer.shape[0] / 2.0, buffer.shape[1] / 2.0])
-    sq_radius = circle_radius**2
+    sq_radius = circle_radius ** 2
 
     for u, v in buffer:
         pos = ti.Vector([u, v], dt=ti.float32) - center
@@ -24,13 +25,7 @@ def write_circle(buffer: ti.template(), circle_radius: float):  # type: ignore
 def get_pose() -> ti.Struct:
     pose = ti.Struct(
         {
-            "rotation": ti.Matrix(
-                [
-                    [1.0, 0.0, 0.0],
-                    [0.0, 1.0, 0.0],
-                    [0.0, 0.0, 1.0],
-                ]
-            ),
+            "rotation": ti.Matrix([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0],]),
             "translation": ti.Vector([0.0, 0.0, 3.0]),
         }
     )
@@ -115,7 +110,13 @@ def demo_sphere_optimize():
 if __name__ == "__main__":
     ti.init(arch=ti.gpu)
 
-    if 1:
+    parser = argparse.ArgumentParser("Chinoxel demo")
+    group = parser.add_mutually_exclusive_group(required=True)
+    group.add_argument("--render", action="store_true")
+    group.add_argument("--optimize", action="store_false")
+    args = parser.parse_args()
+
+    if args.render:
         demo_sphere_render()
     else:
         demo_sphere_optimize()
