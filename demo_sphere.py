@@ -22,24 +22,6 @@ def write_circle(buffer: ti.template(), circle_radius: float):  # type: ignore
 
 
 @ti.kernel
-def get_pose() -> ti.Struct:
-    pose = ti.Struct(
-        {
-            "rotation": ti.Matrix(
-                [
-                    [1.0, 0.0, 0.0],
-                    [0.0, 1.0, 0.0],
-                    [0.0, 0.0, 1.0],
-                ]
-            ),
-            "translation": ti.Vector([0.0, 0.0, 3.0]),
-        }
-    )
-
-    return pose
-
-
-@ti.kernel
 def write_sphere(grid: ti.template(), grid_size: int):  # type: ignore
     """
     For rendering testing purposes, write a sphere in the grid with random color
@@ -58,19 +40,38 @@ def write_sphere(grid: ti.template(), grid_size: int):  # type: ignore
             grid[x, y, z].opacity = ti.random()
         else:
             grid[x, y, z].opacity = 0.0
+            grid[x, y, z].color = ti.Vector([0.0, 0.0, 0.0])
+
+
+@ti.kernel
+def get_pose() -> ti.Struct:
+    pose = ti.Struct(
+        {
+            "rotation": ti.Matrix(
+                [
+                    [1.0, 0.0, 0.0],
+                    [0.0, 1.0, 0.0],
+                    [0.0, 0.0, 1.0],
+                ]
+            ),
+            "translation": ti.Vector([0.0, 0.0, 3.0]),
+        }
+    )
+
+    return pose
 
 
 def get_scene():
     # Build the Chinoxel scene
     # Settings here are completely arbitrary
-    n_nodes = 20
-    resolution = (640, 640)
+    n_nodes = 10
+    resolution = (480, 480)
     focal = 1.0 / resolution[0]
     scene = Scene(
         grid_size=(n_nodes, n_nodes, n_nodes),
         resolution=resolution,
         focal=focal,
-        max_depth_ray=2,
+        max_depth_ray=1,
         LR=0.1,
     )
 
@@ -107,14 +108,16 @@ def demo_sphere_optimize():
 
     # Optimize the scene given the view
     i_step = 0
-    max_steps = 100
+    max_steps = 5
 
     while gui.running:
         # learn for a while, then render
         if i_step < max_steps:
             scene.optimize()
+            print(f"Optim: {i_step}/{max_steps} done")
         else:
             scene.render()
+            scene.tonemap()
 
         i_step += 1
         gui.set_image(scene.view_buffer)

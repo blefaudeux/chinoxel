@@ -1,7 +1,7 @@
 import taichi as ti
 from typing import Tuple
 
-from geometry import get_matrix_from_euler
+from utils import get_matrix_from_euler, clamp
 
 EPS = 1e-4
 INF = 1e10
@@ -40,9 +40,10 @@ class Scene:
 
         self.grid = ti.Struct.field(
             {
-                "color": ti.types.vector(3, ti.f32),
+                "color": ti.types.vector(9, ti.f32),
                 "opacity": ti.f32,
                 "pose": ti.types.vector(3, ti.f32),
+                # TODO: add spherical harmonics here
             },
             shape=grid_size,
         )
@@ -121,7 +122,7 @@ class Scene:
 
         ... note: The rotation axis is arbitrary, could probably passed as a param eventually
         """
-        inc = 1.0 / 180 * 3.1415  # 15 degrees ?
+        inc = 1.0 / 180 * 3.1415  # around 15 degrees
 
         rotation_increment = get_matrix_from_euler(inc, inc, 0.0)
 
@@ -258,14 +259,16 @@ class Scene:
         return min_dist < INF, ti.Vector([x_, y_, z_], ti.i32)
 
     @ti.func
-    def interpolate(self, close, pos, color_acc, norm_acc):
+    def interpolate(self, close, pos, norm_acc):
         """
         Update the accumulated color for this node
         Keep track of the running norm, and return the gradient with respect to opacity
         and the gradient with respect to color
         """
 
-        # TODO: remove duplicates
+        # TODO: follow the plenoxel paper
+        # - interpolate the SH coefficients in the voxel (trilinear)
+        # - compute the color
 
         x, y, z = close
         dist = (pos - self.grid[x, y, z].pose).norm()
@@ -273,29 +276,36 @@ class Scene:
         distance_contrib = dist * self.grid[x, y, z].opacity
         color_grad = ti.exp(-norm_acc) * (1.0 - ti.exp(-distance_contrib))
 
-        color_acc += color_grad * self.grid[x, y, z].color
-        norm_acc += distance_contrib
+        color_acc_inc = color_grad * self.grid[x, y, z].color
+        norm_acc_inc = distance_contrib
 
-        # Opacity gradient
-        opacity_grad = (
-            ti.exp(-norm_acc)
-            * self.grid[x, y, z].color
-            * dist
-            * ti.exp(-distance_contrib)
-        )
+        opacity_grad = self.grid[x, y, z].color  # ti.Vector([0.0, 0.0, 0.0])
 
-        # Color gradient
-        color_grad = ti.exp(-norm_acc) * (1.0 - ti.exp(-distance_contrib))
+        if self.trace_rendering:
+            # Opacity gradient
+            opacity_grad = (
+                ti.exp(-norm_acc)
+                * dist
+                * ti.exp(-distance_contrib)
+                * self.grid[x, y, z].color
+            )
 
-        return color_acc, norm_acc, opacity_grad, color_grad
+            # FIXME: There's another term for the subsequent steps
+
+            # print(
+            #     ti.exp(-norm_acc),
+            #     dist,
+            #     ti.exp(-distance_contrib),
+            #     self.grid[x, y, z].color,
+            # )
+
+        return color_acc_inc, norm_acc_inc, opacity_grad, color_grad
 
     @ti.func
     def store_grad(self, u, v, steps, i_node, color_grad, opacity_grad, close):
         if self.trace_rendering:
             self.view_grad[u, v, steps, i_node].color_grad = color_grad
-            self.view_grad[u, v, steps, i_node].opacity_grad = ti.Vector(
-                [0.1, 0.1, 0.1]
-            )  # opacity_grad
+            self.view_grad[u, v, steps, i_node].opacity_grad = opacity_grad
             self.view_grad[u, v, steps, i_node].pose = close
 
     @ti.func
@@ -310,53 +320,53 @@ class Scene:
         dy = 1 if diff[1] > 0 else -1
         dz = 1 if diff[2] > 0 else -1
 
-        colour_acc, norm_acc, go, gc = self.interpolate(
-            closest, pose, colour_acc, norm_acc
-        )
+        colour_acc_inc, norm_acc_inc, go, gc = self.interpolate(closest, pose, norm_acc)
+        colour_acc += colour_acc_inc
+        norm_acc += norm_acc_inc
         self.store_grad(u, v, steps, 0, gc, go, closest)
 
         # TODO: the cube edges could be stored in a static pattern
         # this could be factorized
         closest[0] += dx
-        colour_acc, norm_acc, go, gc = self.interpolate(
-            closest, pose, colour_acc, norm_acc
-        )
+        colour_acc_inc, norm_acc_inc, go, gc = self.interpolate(closest, pose, norm_acc)
+        colour_acc += colour_acc_inc
+        norm_acc += norm_acc_inc
         self.store_grad(u, v, steps, 1, gc, go, closest)
 
         closest[1] += dy
-        colour_acc, norm_acc, go, gc = self.interpolate(
-            closest, pose, colour_acc, norm_acc
-        )
+        colour_acc_inc, norm_acc_inc, go, gc = self.interpolate(closest, pose, norm_acc)
+        colour_acc += colour_acc_inc
+        norm_acc += norm_acc_inc
         self.store_grad(u, v, steps, 2, gc, go, closest)
 
         closest[0] -= dx
-        colour_acc, norm_acc, go, gc = self.interpolate(
-            closest, pose, colour_acc, norm_acc
-        )
+        colour_acc_inc, norm_acc_inc, go, gc = self.interpolate(closest, pose, norm_acc)
+        colour_acc += colour_acc_inc
+        norm_acc += norm_acc_inc
         self.store_grad(u, v, steps, 3, gc, go, closest)
 
         closest[2] += dz
-        colour_acc, norm_acc, go, gc = self.interpolate(
-            closest, pose, colour_acc, norm_acc
-        )
+        colour_acc_inc, norm_acc_inc, go, gc = self.interpolate(closest, pose, norm_acc)
+        colour_acc += colour_acc_inc
+        norm_acc += norm_acc_inc
         self.store_grad(u, v, steps, 4, gc, go, closest)
 
         closest[0] += dx
-        colour_acc, norm_acc, go, gc = self.interpolate(
-            closest, pose, colour_acc, norm_acc
-        )
+        colour_acc_inc, norm_acc_inc, go, gc = self.interpolate(closest, pose, norm_acc)
+        colour_acc += colour_acc_inc
+        norm_acc += norm_acc_inc
         self.store_grad(u, v, steps, 5, gc, go, closest)
 
         closest[1] -= dy
-        colour_acc, norm_acc, go, gc = self.interpolate(
-            closest, pose, colour_acc, norm_acc
-        )
+        colour_acc_inc, norm_acc_inc, go, gc = self.interpolate(closest, pose, norm_acc)
+        colour_acc += colour_acc_inc
+        norm_acc += norm_acc_inc
         self.store_grad(u, v, steps, 6, gc, go, closest)
 
         closest[0] -= dx
-        colour_acc, norm_acc, go, gc = self.interpolate(
-            closest, pose, colour_acc, norm_acc
-        )
+        colour_acc_inc, norm_acc_inc, go, gc = self.interpolate(closest, pose, norm_acc)
+        colour_acc += colour_acc_inc
+        norm_acc += norm_acc_inc
         self.store_grad(u, v, steps, 7, gc, go, closest)
 
         return colour_acc, norm_acc
@@ -380,21 +390,11 @@ class Scene:
         """
 
         for x, y, z in self.grid:
-            self.grid[x, y, z].opacity = ti.max(
-                ti.min(self.grid[x, y, z].opacity, 1.0), 0.0
-            )
+            self.grid[x, y, z].opacity = clamp(self.grid[x, y, z].opacity)
 
-            self.grid[x, y, z].color[0] = ti.max(
-                ti.min(self.grid[x, y, z].color[0], 1.0), 0.0
-            )
-
-            self.grid[x, y, z].color[1] = ti.max(
-                ti.min(self.grid[x, y, z].color[1], 1.0), 0.0
-            )
-
-            self.grid[x, y, z].color[2] = ti.max(
-                ti.min(self.grid[x, y, z].color[2], 1.0), 0.0
-            )
+            self.grid[x, y, z].color[0] = clamp(self.grid[x, y, z].color[0])
+            self.grid[x, y, z].color[1] = clamp(self.grid[x, y, z].color[1])
+            self.grid[x, y, z].color[2] = clamp(self.grid[x, y, z].color[2])
 
     @ti.kernel
     def render(self):
@@ -463,9 +463,7 @@ class Scene:
                         if grad_log.color_grad != 0.0:
                             # FIXME: Grad computations are mostly broken
                             color_step = self.LR * grad_log.color_grad * diff
-                            opacity_step = (
-                                0.1  # self.LR * grad_log.opacity_grad.dot(diff)
-                            )
+                            opacity_step = self.LR * grad_log.opacity_grad.dot(diff)
 
                             # Warning: different threads can contribute to gradients
                             # on the same node here, hence atomic adds should really be required
@@ -487,7 +485,7 @@ class Scene:
 
         # Compute the resulting error
         mismatch = self.compute_mistmatch()
-        print("Current mistmatch: ", mismatch)
+        print("Current mistmatch: {:.2f}".format(mismatch))
 
         # Make sure that future render calls are not traced by default
         self.trace_rendering = False
